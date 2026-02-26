@@ -37,8 +37,8 @@ WF_ACTIVE_CONFIG_REALPATH=""
 WF_FLOW_ID=""
 WF_FLOW_RUN_DIR=""
 WF_FLOW_START_TS=""
-WF_LAST_PHASE_EVIDENCE_PATH=""
-WF_LAST_PHASE_VERDICT_PATH=""
+WF_FLOW_ARTIFACT_PATH=""
+WF_LAST_PHASE_ARTIFACT_PATH=""
 
 die() {
   echo "error: $*" >&2
@@ -80,6 +80,218 @@ file_sha256() {
     return 0
   fi
   echo "unavailable"
+}
+
+wf_deny() {
+  local code="$1"
+  shift || true
+  local message="$*"
+  printf 'wf-policy-deny code=%s message=%s\n' "$code" "$message" >&2
+  exit 42
+}
+
+wf_args_sha256() {
+  python3 - <<'PY' "$@"
+import hashlib
+import json
+import sys
+
+payload = json.dumps(sys.argv[1:], ensure_ascii=True, separators=(",", ":"))
+print(hashlib.sha256(payload.encode("utf-8")).hexdigest())
+PY
+}
+
+wf_is_internal_command() {
+  local cmd="$1"
+  [[ "$cmd" == _* ]]
+}
+
+wf_is_mutating_command() {
+  local cmd="$1"
+  case "$cmd" in
+    flow|pod-up|pod-delete|pod-butter|config-sync|bootstrap|checkout|workflow-sync|sweep-start|fetch-all|fetch-run|checklist-reset|task-run|local-push)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+wf_is_strict_core_command() {
+  local cmd="$1"
+  case "$cmd" in
+    flow|pod-up|pod-wait|pod-status|pod-delete|config-sync|bootstrap|checkout|sweep-start|sweep-status|fetch-all|fetch-run|checklist-status|_sweep_run_all|_sweep_status)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+wf_require_step_permit() {
+  local cmd="$1"
+  shift || true
+
+  local permit_path="${WF_STEP_PERMIT_FILE:-${WF_PERMIT_FILE:-}}"
+  [[ -n "$permit_path" ]] || wf_deny "DENY_MANUAL_APPROVAL_MISSING" "set WF_STEP_PERMIT_FILE or WF_PERMIT_FILE for command=${cmd}"
+  [[ -f "$permit_path" ]] || wf_deny "DENY_PERMIT_FILE_MISSING" "permit file not found: ${permit_path}"
+
+  local permit_secret="${WF_PERMIT_SECRET:-}"
+  if [[ -z "$permit_secret" || "$permit_secret" == "CHANGE_ME" ]]; then
+    wf_deny "DENY_PERMIT_SECRET_MISSING" "set WF_PERMIT_SECRET to verify signed permits"
+  fi
+
+  local now_epoch
+  now_epoch="$(date +%s)"
+  local args_sha
+  args_sha="$(wf_args_sha256 "$@")"
+  local config_sha
+  config_sha="$(file_sha256 "$CONFIG_PATH")"
+
+  local skew_secs="${WF_PERMIT_CLOCK_SKEW_SECS:-0}"
+  [[ "$skew_secs" =~ ^[0-9]+$ ]] || wf_deny "DENY_PERMIT_POLICY_INVALID" "WF_PERMIT_CLOCK_SKEW_SECS must be integer"
+
+  local ledger_dir
+  ledger_dir="$(resolve_local_path "${WF_PERMIT_LEDGER_DIR:-artifacts/policy/permits}")"
+  mkdir -p "$ledger_dir"
+
+  local verdict
+  if ! verdict="$(WF_PERMIT_SECRET_VALUE="$permit_secret" python3 - <<'PY' "$permit_path" "$cmd" "$args_sha" "$config_sha" "$now_epoch" "$skew_secs" "$ledger_dir"
+import hashlib
+import hmac
+import json
+import os
+import pathlib
+import re
+import sys
+
+permit_path, command, args_sha, config_sha, now_epoch, skew_secs, ledger_dir = sys.argv[1:]
+now_epoch_i = int(now_epoch)
+skew_i = int(skew_secs)
+secret = os.environ.get("WF_PERMIT_SECRET_VALUE", "")
+
+
+def deny(code: str, message: str) -> None:
+    print(f"DENY|{code}|{message}")
+    raise SystemExit(0)
+
+
+def require_field(payload: dict, name: str):
+    value = payload.get(name)
+    if value is None:
+        deny("DENY_PERMIT_PARSE_ERROR", f"missing field: {name}")
+    return value
+
+
+try:
+    permit = json.loads(pathlib.Path(permit_path).read_text())
+except FileNotFoundError:
+    deny("DENY_PERMIT_FILE_MISSING", f"permit file not found: {permit_path}")
+except Exception as exc:
+    deny("DENY_PERMIT_PARSE_ERROR", f"invalid permit JSON: {exc}")
+
+step_id = str(require_field(permit, "step_id")).strip()
+permit_command = str(require_field(permit, "command")).strip()
+permit_args_sha = str(require_field(permit, "args_sha256")).strip()
+permit_config_sha = str(require_field(permit, "config_sha256")).strip()
+nonce = str(require_field(permit, "nonce")).strip()
+signature = str(require_field(permit, "signature")).strip()
+
+expires_raw = require_field(permit, "expires_at_epoch")
+try:
+    expires_at = int(str(expires_raw))
+except Exception:
+    deny("DENY_PERMIT_PARSE_ERROR", "expires_at_epoch must be an integer")
+
+if not step_id:
+    deny("DENY_PERMIT_PARSE_ERROR", "step_id cannot be empty")
+
+if permit_command != command:
+    deny("DENY_COMMAND_NOT_ALLOWED", f"permit command={permit_command} requested={command}")
+
+if permit_args_sha != args_sha:
+    deny("DENY_ARGS_HASH_MISMATCH", "permit args_sha256 does not match requested args")
+
+if permit_config_sha != config_sha:
+    deny("DENY_CONFIG_HASH_MISMATCH", "permit config_sha256 does not match active config")
+
+if now_epoch_i > (expires_at + skew_i):
+    deny("DENY_PERMIT_EXPIRED", f"permit expired at epoch={expires_at}")
+
+if not re.fullmatch(r"[A-Za-z0-9._-]{1,128}", nonce):
+    deny("DENY_PERMIT_PARSE_ERROR", "nonce format invalid")
+
+if not re.fullmatch(r"[0-9a-fA-F]{64}", signature):
+    deny("DENY_PERMIT_PARSE_ERROR", "signature must be 64 hex chars")
+
+payload = "|".join([
+    step_id,
+    permit_command,
+    permit_args_sha,
+    permit_config_sha,
+    str(expires_at),
+    nonce,
+])
+expected = hmac.new(secret.encode("utf-8"), payload.encode("utf-8"), hashlib.sha256).hexdigest()
+if not hmac.compare_digest(signature.lower(), expected.lower()):
+    deny("DENY_SIGNATURE_INVALID", "permit signature verification failed")
+
+used_path = pathlib.Path(ledger_dir) / f"{nonce}.used.json"
+if used_path.exists():
+    deny("DENY_PERMIT_REPLAY", f"nonce already consumed: {nonce}")
+
+used_path.parent.mkdir(parents=True, exist_ok=True)
+record = {
+    "step_id": step_id,
+    "command": command,
+    "args_sha256": args_sha,
+    "config_sha256": config_sha,
+    "nonce": nonce,
+    "permit_path": str(pathlib.Path(permit_path).resolve()),
+    "validated_at_epoch": now_epoch_i,
+}
+used_path.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n")
+
+print(f"ALLOW|{step_id}|{nonce}")
+PY
+)"; then
+    wf_deny "DENY_PERMIT_PARSE_ERROR" "permit verification failed unexpectedly"
+  fi
+
+  local status code detail
+  IFS='|' read -r status code detail <<<"$verdict"
+  if [[ "$status" != "ALLOW" ]]; then
+    wf_deny "$code" "$detail"
+  fi
+
+  log "strict permit accepted: step_id=${code} nonce=${detail} command=${cmd}"
+}
+
+wf_strict_pre_dispatch_guard() {
+  local cmd="$1"
+  shift || true
+
+  if ! is_truthy "${WF_STRICT_MANUAL:-0}"; then
+    return 0
+  fi
+
+  if wf_is_internal_command "$cmd"; then
+    return 0
+  fi
+
+  if [[ "$cmd" == "flow" ]] && ! is_truthy "${WF_STRICT_ALLOW_FLOW_AUTORUN:-0}"; then
+    wf_deny "DENY_FLOW_AUTOMATION_BLOCKED" "strict mode blocks flow auto-run; execute explicit phase commands with permits"
+  fi
+
+  if ! wf_is_strict_core_command "$cmd"; then
+    wf_deny "DENY_NON_CORE_COMMAND" "strict mode blocks command=${cmd}; allowed core lifecycle commands only"
+  fi
+
+  if wf_is_mutating_command "$cmd"; then
+    wf_require_step_permit "$cmd" "$@"
+  fi
 }
 
 run_with_timeout() {
@@ -176,6 +388,12 @@ enforce_noninteractive_policy() {
 constitution_preflight() {
   local cmd="$1"
   load_config
+
+  if is_truthy "${WF_STRICT_MANUAL:-0}"; then
+    if [[ "$WF_ACTIVE_CONFIG_REALPATH" != "$CANONICAL_CONFIG_PATH" ]]; then
+      die "strict mode requires canonical config path: ${CANONICAL_CONFIG_PATH}"
+    fi
+  fi
 
   if [[ "${WF_CONSTITUTION_VERSION:-1}" != "1" ]]; then
     die "unsupported WF_CONSTITUTION_VERSION=${WF_CONSTITUTION_VERSION:-unset} (expected: 1)"
@@ -305,23 +523,24 @@ flow_init_context() {
   root="$(flow_evidence_root)"
   WF_FLOW_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$-$RANDOM"
   WF_FLOW_RUN_DIR="${root}/${WF_FLOW_ID}"
+  WF_FLOW_ARTIFACT_PATH="${WF_FLOW_RUN_DIR}/flow.state.json"
   WF_FLOW_START_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   mkdir -p "$WF_FLOW_RUN_DIR"
 }
 
 flow_write_start_artifact() {
   local options_desc="$1"
-  local start_path="${WF_FLOW_RUN_DIR}/flow.start.json"
+  local artifact_path="$WF_FLOW_ARTIFACT_PATH"
   local config_sha
   config_sha="$(file_sha256 "$CONFIG_PATH")"
 
-  python3 - <<'PY' "$start_path" "$WF_FLOW_ID" "$WF_FLOW_START_TS" "$CONFIG_PATH" "$config_sha" "${LIUM_TARGET:-}" "${OPS_DEFAULT_HOST:-}" "$(resolved_transport_hint)" "${REMOTE_ENV_PATH:-}" "$options_desc"
+  python3 - <<'PY' "$artifact_path" "$WF_FLOW_ID" "$WF_FLOW_START_TS" "$CONFIG_PATH" "$config_sha" "${LIUM_TARGET:-}" "${OPS_DEFAULT_HOST:-}" "$(resolved_transport_hint)" "${REMOTE_ENV_PATH:-}" "$options_desc"
 import json
 import pathlib
 import sys
 
 (
-    start_path,
+    artifact_path,
     flow_id,
     started_at,
     config_path,
@@ -333,6 +552,7 @@ import sys
     options_desc,
 ) = sys.argv[1:]
 
+path = pathlib.Path(artifact_path)
 payload = {
     "flow_id": flow_id,
     "started_at": started_at,
@@ -343,8 +563,11 @@ payload = {
     "transport_hint": transport,
     "remote_env_path": remote_env,
     "options": options_desc,
+    "summary": None,
+    "phases": {},
+    "phase_events": [],
 }
-pathlib.Path(start_path).write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
 PY
 }
 
@@ -352,26 +575,39 @@ flow_write_summary_artifact() {
   local rc="$1"
   local failed_phase="$2"
   local checklist_file="$3"
-  local summary_path="${WF_FLOW_RUN_DIR}/flow.summary.json"
+  local artifact_path="$WF_FLOW_ARTIFACT_PATH"
   local ended_at
   ended_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
-  python3 - <<'PY' "$summary_path" "$WF_FLOW_ID" "$WF_FLOW_START_TS" "$ended_at" "$rc" "$failed_phase" "$checklist_file"
+  python3 - <<'PY' "$artifact_path" "$WF_FLOW_ID" "$WF_FLOW_START_TS" "$ended_at" "$rc" "$failed_phase" "$checklist_file"
 import json
 import pathlib
 import sys
 
-summary_path, flow_id, started_at, ended_at, rc, failed_phase, checklist_file = sys.argv[1:]
-payload = {
-    "flow_id": flow_id,
-    "started_at": started_at,
-    "ended_at": ended_at,
+artifact_path, flow_id, started_at, ended_at, rc, failed_phase, checklist_file = sys.argv[1:]
+path = pathlib.Path(artifact_path)
+
+if path.exists():
+    try:
+        payload = json.loads(path.read_text())
+    except Exception:
+        payload = {}
+else:
+    payload = {}
+
+payload["flow_id"] = flow_id
+payload["started_at"] = started_at
+payload["ended_at"] = ended_at
+payload["summary"] = {
     "ok": rc == "0",
     "exit_code": int(rc),
     "failed_phase": failed_phase,
     "checklist_file": checklist_file,
 }
-pathlib.Path(summary_path).write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+payload.setdefault("phases", {})
+payload.setdefault("phase_events", [])
+
+path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
 PY
 }
 
@@ -426,123 +662,13 @@ flow_phase_validate() {
   local note="$3"
   local command_name="$4"
   local command_rc="$5"
-  local fsm_before="${6:-UNAVAILABLE}"
-  local fsm_after="${7:-UNAVAILABLE}"
 
-  local evidence_path="${WF_FLOW_RUN_DIR}/phase.${phase}.evidence.json"
-  local det_path="${WF_FLOW_RUN_DIR}/phase.${phase}.deterministic.json"
-  local verdict_path="${WF_FLOW_RUN_DIR}/phase.${phase}.verdict.json"
+  local artifact_path="$WF_FLOW_ARTIFACT_PATH"
   local phase_started
   phase_started="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   local phase_ended
   phase_ended="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   local effective_teardown="${WF_FLOW_TEARDOWN_MODE:-${WF_DEFAULT_TEARDOWN:-keep}}"
-
-  python3 - <<'PY' "$evidence_path" "$WF_FLOW_ID" "$phase" "$phase_started" "$phase_ended" "$CONFIG_PATH" "$(file_sha256 "$CONFIG_PATH")" "${LIUM_TARGET:-}" "${OPS_DEFAULT_HOST:-}" "$(resolved_transport_hint)" "${REMOTE_ENV_PATH:-}" "$command_name" "$command_rc" "$phase_status" "$note" "$fsm_before" "$fsm_after" "${REPO_URL:-}" "$effective_teardown" "${WF_FLOW_RUN_DIR}/flow.start.json"
-import json
-import pathlib
-import sys
-
-(
-    evidence_path,
-    flow_id,
-    phase,
-    phase_started,
-    phase_ended,
-    config_path,
-    config_sha,
-    lium_target,
-    fallback_host,
-    transport,
-    remote_env,
-    command_name,
-    command_rc,
-    phase_status,
-    note,
-    fsm_before,
-    fsm_after,
-    repo_url,
-    teardown_mode,
-    flow_start_artifact,
-) = sys.argv[1:]
-
-phase_contracts = {
-    "P00": {
-        "intent": "Precheck prerequisites before any remote mutation.",
-        "commands": ["flow-precheck"],
-    },
-    "P10": {
-        "intent": "Provision pod deterministically or explicitly mark policy skip.",
-        "commands": ["pod-up", "provision-policy"],
-    },
-    "P20": {
-        "intent": "Resolve and lock a legal execution target for remaining phases.",
-        "commands": ["target-bind"],
-    },
-    "P30": {
-        "intent": "Prove remote target is reachable and pod is ready.",
-        "commands": ["pod-status"],
-    },
-    "P40": {
-        "intent": "Satisfy bootstrap prerequisites and helper initialization policy.",
-        "commands": ["bootstrap"],
-    },
-    "P50": {
-        "intent": "Checkout repository and validate torch/data contracts for training readiness.",
-        "commands": ["checkout"],
-    },
-    "P60": {
-        "intent": "Start, resume-check, or policy-skip sweep in a declared mode.",
-        "commands": ["sweep-start", "sweep-status", "sweep-policy"],
-    },
-    "P70": {
-        "intent": "Monitor sweep completion state via wait or snapshot path.",
-        "commands": ["sweep-wait", "sweep-status"],
-    },
-    "P80": {
-        "intent": "Fetch artifacts according to explicit fetch policy.",
-        "commands": ["fetch-policy", "fetch-all", "fetch-run"],
-    },
-    "P90": {
-        "intent": "Apply explicit teardown policy without implicit destruction.",
-        "commands": ["teardown-policy", "pod-delete"],
-    },
-    "P99": {
-        "intent": "Emit final summary only after all prior phases are known.",
-        "commands": ["flow-summary"],
-    },
-}
-
-contract = phase_contracts.get(phase, {"intent": "", "laws": [], "commands": []})
-
-payload = {
-    "flow_id": flow_id,
-    "phase_id": phase,
-    "started_at": phase_started,
-    "ended_at": phase_ended,
-    "active_config_path": config_path,
-    "active_config_sha256": config_sha,
-    "lium_target": lium_target,
-    "ops_default_host": fallback_host,
-    "transport_hint": transport,
-    "remote_env_path": remote_env,
-    "command_name": command_name,
-    "command_rc": int(command_rc),
-    "phase_status": phase_status,
-    "note": note,
-    "fsm_before": fsm_before,
-    "fsm_after": fsm_after,
-    "repo_url": repo_url,
-    "teardown_mode": teardown_mode,
-    "command_transcript_path": "",
-    "intent_mode": "phase_contract",
-    "contract_intent": contract["intent"],
-    "allowed_commands": contract["commands"],
-    "flow_start_artifact": flow_start_artifact,
-    "command_in_contract": command_name in set(contract["commands"]),
-}
-pathlib.Path(evidence_path).write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
-PY
 
   local -a det_violations=()
   local det_pass=1
@@ -592,54 +718,148 @@ PY
     det_violations+=("intent_command_mismatch")
   fi
 
-  python3 - <<'PY' "$det_path" "$phase" "$det_pass" "${det_violations[@]-}"
-import json
-import pathlib
-import sys
-
-det_path = sys.argv[1]
-phase = sys.argv[2]
-det_pass = sys.argv[3] == "1"
-violations = sys.argv[4:]
-
-payload = {
-    "phase": phase,
-    "status": "pass" if det_pass else "fail",
-    "pass": det_pass,
-    "violations": violations,
-}
-pathlib.Path(det_path).write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
-PY
-
-  python3 - <<'PY' "$verdict_path" "$phase" "$det_pass" "$evidence_path" "$det_path"
+  python3 - <<'PY' "$artifact_path" "$WF_FLOW_ID" "$phase" "$phase_started" "$phase_ended" "$CONFIG_PATH" "$(file_sha256 "$CONFIG_PATH")" "${LIUM_TARGET:-}" "${OPS_DEFAULT_HOST:-}" "$(resolved_transport_hint)" "${REMOTE_ENV_PATH:-}" "$command_name" "$command_rc" "$phase_status" "$note" "${REPO_URL:-}" "$effective_teardown" "$det_pass" "${det_violations[@]}"
 import json
 import pathlib
 import sys
 
 (
-    verdict_path,
+    artifact_path,
+    flow_id,
     phase,
+    phase_started,
+    phase_ended,
+    config_path,
+    config_sha,
+    lium_target,
+    fallback_host,
+    transport,
+    remote_env,
+    command_name,
+    command_rc,
+    phase_status,
+    note,
+    repo_url,
+    teardown_mode,
     det_pass,
-    evidence_path,
-    det_path,
+    *violations,
 ) = sys.argv[1:]
 
-payload = {
-    "phase": phase,
-    "deterministic": "pass" if det_pass == "1" else "fail",
-    "phase_pass": det_pass == "1",
-    "evidence": evidence_path,
-    "deterministic_artifact": det_path,
+det_pass_bool = det_pass == "1"
+
+phase_contracts = {
+    "P00": {
+        "intent": "Precheck prerequisites before any remote mutation.",
+        "commands": ["flow-precheck"],
+    },
+    "P10": {
+        "intent": "Provision pod deterministically or explicitly mark policy skip.",
+        "commands": ["pod-up", "provision-policy"],
+    },
+    "P20": {
+        "intent": "Resolve and lock a legal execution target for remaining phases.",
+        "commands": ["target-bind"],
+    },
+    "P30": {
+        "intent": "Prove remote target is reachable and pod is ready.",
+        "commands": ["pod-status"],
+    },
+    "P40": {
+        "intent": "Satisfy bootstrap prerequisites and helper initialization policy.",
+        "commands": ["bootstrap"],
+    },
+    "P50": {
+        "intent": "Checkout repository and validate torch/data contracts for training readiness.",
+        "commands": ["checkout"],
+    },
+    "P60": {
+        "intent": "Start, resume-check, or policy-skip sweep in a declared mode.",
+        "commands": ["sweep-start", "sweep-status", "sweep-policy"],
+    },
+    "P70": {
+        "intent": "Monitor sweep completion state via wait or snapshot path.",
+        "commands": ["sweep-wait", "sweep-status"],
+    },
+    "P80": {
+        "intent": "Fetch artifacts according to explicit fetch policy.",
+        "commands": ["fetch-policy", "fetch-all", "fetch-run"],
+    },
+    "P90": {
+        "intent": "Apply explicit teardown policy without implicit destruction.",
+        "commands": ["teardown-policy", "pod-delete"],
+    },
+    "P99": {
+        "intent": "Emit final summary only after all prior phases are known.",
+        "commands": ["flow-summary"],
+    },
 }
-pathlib.Path(verdict_path).write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+
+contract = phase_contracts.get(phase, {"intent": "", "commands": []})
+
+path = pathlib.Path(artifact_path)
+if path.exists():
+    try:
+        payload = json.loads(path.read_text())
+    except Exception:
+        payload = {}
+else:
+    payload = {}
+
+payload.setdefault("flow_id", flow_id)
+payload.setdefault("started_at", phase_started)
+payload.setdefault("summary", None)
+payload.setdefault("phases", {})
+payload.setdefault("phase_events", [])
+
+phase_payload = {
+    "phase_id": phase,
+    "started_at": phase_started,
+    "ended_at": phase_ended,
+    "active_config_path": config_path,
+    "active_config_sha256": config_sha,
+    "lium_target": lium_target,
+    "ops_default_host": fallback_host,
+    "transport_hint": transport,
+    "remote_env_path": remote_env,
+    "command_name": command_name,
+    "command_rc": int(command_rc),
+    "phase_status": phase_status,
+    "note": note,
+    "repo_url": repo_url,
+    "teardown_mode": teardown_mode,
+    "intent_mode": "phase_contract",
+    "contract_intent": contract["intent"],
+    "allowed_commands": contract["commands"],
+    "command_in_contract": command_name in set(contract["commands"]),
+    "deterministic": {
+        "status": "pass" if det_pass_bool else "fail",
+        "pass": det_pass_bool,
+        "violations": violations,
+    },
+}
+
+payload["phases"][phase] = phase_payload
+payload["phase_events"].append(
+    {
+        "phase": phase,
+        "command_name": command_name,
+        "command_rc": int(command_rc),
+        "phase_status": phase_status,
+        "deterministic": "pass" if det_pass_bool else "fail",
+        "violations": violations,
+        "recorded_at": phase_ended,
+    }
+)
+payload["updated_at"] = phase_ended
+
+path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
 PY
 
-  WF_LAST_PHASE_EVIDENCE_PATH="$evidence_path"
-  WF_LAST_PHASE_VERDICT_PATH="$verdict_path"
+  WF_LAST_PHASE_ARTIFACT_PATH="$artifact_path"
 
   local det_label="fail"
   [[ "$det_pass" == "1" ]] && det_label="pass"
-  log "PHASE=${phase} DET=${det_label} VERDICT=${verdict_path}"
+  log "PHASE=${phase} DET=${det_label} ARTIFACT=${artifact_path}"
   [[ "$det_pass" == "1" ]]
 }
 
@@ -649,17 +869,15 @@ flow_finalize_phase() {
   local note="$3"
   local command_name="$4"
   local command_rc="$5"
-  local fsm_before="${6:-UNAVAILABLE}"
-  local fsm_after="${7:-UNAVAILABLE}"
 
-  if ! flow_phase_validate "$phase" "ok" "$note" "$command_name" "$command_rc" "$fsm_before" "$fsm_after"; then
+  if ! flow_phase_validate "$phase" "ok" "$note" "$command_name" "$command_rc"; then
     checklist_append_event "$checklist_file" "$phase" "validation_failed" "$note"
     return 1
   fi
 
   checklist_mark_done "$checklist_file" "$phase"
   checklist_append_event "$checklist_file" "$phase" "ok" "$note"
-  log "PHASE=${phase} STATUS=ok CODE=0 ARTIFACT=${WF_LAST_PHASE_EVIDENCE_PATH}"
+  log "PHASE=${phase} STATUS=ok CODE=0 ARTIFACT=${WF_LAST_PHASE_ARTIFACT_PATH}"
   return 0
 }
 
@@ -669,52 +887,12 @@ flow_record_phase_failure() {
   local note="$3"
   local command_name="$4"
   local command_rc="$5"
-  local fsm_before="${6:-UNAVAILABLE}"
-  local fsm_after="${7:-UNAVAILABLE}"
 
-  if ! flow_phase_validate "$phase" "fail" "$note" "$command_name" "$command_rc" "$fsm_before" "$fsm_after"; then
+  if ! flow_phase_validate "$phase" "fail" "$note" "$command_name" "$command_rc"; then
     true
   fi
   checklist_append_event "$checklist_file" "$phase" "failed" "$note"
-  log "PHASE=${phase} STATUS=fail CODE=${command_rc} ARTIFACT=${WF_LAST_PHASE_EVIDENCE_PATH}"
-}
-
-upsert_config_value() {
-  local file_path="$1"
-  local key="$2"
-  local value="$3"
-
-  python3 - <<'PY' "$file_path" "$key" "$value"
-import pathlib
-import re
-import sys
-
-file_path, key, value = sys.argv[1], sys.argv[2], sys.argv[3]
-path = pathlib.Path(file_path)
-if not path.exists():
-    raise SystemExit(f"config file does not exist: {file_path}")
-
-raw = path.read_text().splitlines()
-escaped = value.replace("\\", "\\\\").replace('"', '\\"')
-newline = f'{key}="{escaped}"'
-pattern = re.compile(rf'^\s*{re.escape(key)}=')
-
-updated = False
-out = []
-for line in raw:
-    if not updated and pattern.match(line):
-        out.append(newline)
-        updated = True
-    else:
-        out.append(line)
-
-if not updated:
-    if out and out[-1] != "":
-        out.append("")
-    out.append(newline)
-
-path.write_text("\n".join(out) + "\n")
-PY
+  log "PHASE=${phase} STATUS=fail CODE=${command_rc} ARTIFACT=${WF_LAST_PHASE_ARTIFACT_PATH}"
 }
 
 flow_wait_for_completion() {
@@ -976,15 +1154,9 @@ cmd_flow() {
       fi
 
       if [[ "$rc" -eq 0 && -z "${LIUM_TARGET:-}" ]]; then
-        if [[ -n "${LIUM_POD_NAME:-}" ]]; then
-          upsert_config_value "$CONFIG_PATH" "LIUM_TARGET" "$LIUM_POD_NAME"
-          log "flow target autobind: set LIUM_TARGET=${LIUM_POD_NAME} in ${CONFIG_PATH}"
-          load_config
-        else
-          rc=1
-          failed_phase="P10"
-          flow_record_phase_failure "$checklist_file" "P10" "unable to autobind LIUM_TARGET from LIUM_POD_NAME" "target-autobind" "$rc"
-        fi
+        rc=1
+        failed_phase="P10"
+        flow_record_phase_failure "$checklist_file" "P10" "autobind disabled: set LIUM_TARGET explicitly before continuing" "target-autobind-disabled" "$rc"
       fi
     fi
 
@@ -1199,6 +1371,19 @@ cmd_flow() {
 }
 
 load_config() {
+  local strict_manual_env_set="${WF_STRICT_MANUAL+x}"
+  local strict_manual_env_value="${WF_STRICT_MANUAL-}"
+  local strict_flow_env_set="${WF_STRICT_ALLOW_FLOW_AUTORUN+x}"
+  local strict_flow_env_value="${WF_STRICT_ALLOW_FLOW_AUTORUN-}"
+  local permit_file_env_set="${WF_STEP_PERMIT_FILE+x}"
+  local permit_file_env_value="${WF_STEP_PERMIT_FILE-}"
+  local permit_secret_env_set="${WF_PERMIT_SECRET+x}"
+  local permit_secret_env_value="${WF_PERMIT_SECRET-}"
+  local permit_skew_env_set="${WF_PERMIT_CLOCK_SKEW_SECS+x}"
+  local permit_skew_env_value="${WF_PERMIT_CLOCK_SKEW_SECS-}"
+  local permit_ledger_env_set="${WF_PERMIT_LEDGER_DIR+x}"
+  local permit_ledger_env_value="${WF_PERMIT_LEDGER_DIR-}"
+
   if [[ ! -f "$CONFIG_PATH" ]]; then
     die "config file not found: ${CONFIG_PATH}"
   fi
@@ -1210,6 +1395,25 @@ load_config() {
 
   # shellcheck disable=SC1090
   source "$CONFIG_PATH"
+
+  if [[ -n "$strict_manual_env_set" ]]; then
+    WF_STRICT_MANUAL="$strict_manual_env_value"
+  fi
+  if [[ -n "$strict_flow_env_set" ]]; then
+    WF_STRICT_ALLOW_FLOW_AUTORUN="$strict_flow_env_value"
+  fi
+  if [[ -n "$permit_file_env_set" ]]; then
+    WF_STEP_PERMIT_FILE="$permit_file_env_value"
+  fi
+  if [[ -n "$permit_secret_env_set" ]]; then
+    WF_PERMIT_SECRET="$permit_secret_env_value"
+  fi
+  if [[ -n "$permit_skew_env_set" ]]; then
+    WF_PERMIT_CLOCK_SKEW_SECS="$permit_skew_env_value"
+  fi
+  if [[ -n "$permit_ledger_env_set" ]]; then
+    WF_PERMIT_LEDGER_DIR="$permit_ledger_env_value"
+  fi
 
   if [[ "${WF_ACTIVE_COMMAND:-}" != _* && "$WF_ACTIVE_CONFIG_REALPATH" != "$CANONICAL_CONFIG_PATH" ]]; then
     if ! is_truthy "${WF_ALLOW_OVERRIDE:-0}"; then
@@ -1360,180 +1564,6 @@ ensure_remote_workflow_script() {
   remote_exec_raw "chmod 700 $(shell_escape "$remote_script") || chmod +x $(shell_escape "$remote_script") || true"
 }
 
-fsm_state_file_hint() {
-  if [[ -n "${WF_STATE_FILE:-}" ]]; then
-    echo "$WF_STATE_FILE"
-    return 0
-  fi
-  echo "${OPS_REMOTE_OUTPUTS_DIR}/_control/workflow_state.json"
-}
-
-fsm_get_remote_state() {
-  require_var OPS_REMOTE_OUTPUTS_DIR
-  local out line state
-  state="INIT"
-  out="$(remote_exec_env 'python3 - <<'"'"'PY'"'"'
-import json
-import os
-
-path = os.environ.get("WF_STATE_FILE") or os.path.join(
-    os.environ["OPS_REMOTE_OUTPUTS_DIR"], "_control", "workflow_state.json"
-)
-state = "INIT"
-try:
-    with open(path, "r") as f:
-        state = json.load(f).get("state", "INIT")
-except Exception:
-    pass
-
-print(f"WF_STATE={state}")
-PY' || true)"
-
-  while IFS= read -r line; do
-    if [[ "$line" == WF_STATE=* ]]; then
-      state="${line#WF_STATE=}"
-    fi
-  done <<<"$out"
-
-  echo "$state"
-}
-
-fsm_set_remote_state() {
-  require_var OPS_REMOTE_OUTPUTS_DIR
-  local next_state="$1"
-  local reason="${2:-}"
-
-  local remote_cmd
-  remote_cmd="$(cat <<EOF
-export WF_FSM_NEXT_STATE=$(shell_escape "$next_state")
-export WF_FSM_REASON=$(shell_escape "$reason")
-python3 - <<'PY'
-import json
-import os
-import pathlib
-import socket
-import time
-
-path = os.environ.get("WF_STATE_FILE") or os.path.join(
-    os.environ["OPS_REMOTE_OUTPUTS_DIR"], "_control", "workflow_state.json"
-)
-next_state = os.environ.get("WF_FSM_NEXT_STATE", "INIT")
-reason = os.environ.get("WF_FSM_REASON", "")
-
-p = pathlib.Path(path)
-p.parent.mkdir(parents=True, exist_ok=True)
-
-previous = "INIT"
-if p.exists():
-    try:
-        previous = json.loads(p.read_text()).get("state", "INIT")
-    except Exception:
-        previous = "INIT"
-
-now = int(time.time())
-payload = {
-    "state": next_state,
-    "previous_state": previous,
-    "reason": reason,
-    "updated_at_unix": now,
-    "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now)),
-    "host": socket.gethostname(),
-}
-p.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
-print(f"WF_STATE={next_state}")
-PY
-EOF
-)"
-
-  remote_exec_env "$remote_cmd" >/dev/null
-}
-
-fsm_promote_pod_ready_if_needed() {
-  if ! is_truthy "${WF_FSM_ENFORCE:-1}"; then
-    return 0
-  fi
-
-  local state
-  state="$(fsm_get_remote_state)"
-  if [[ "$state" == "INIT" || "$state" == "POD_TERMINATED" ]]; then
-    fsm_set_remote_state "POD_READY" "auto-promote: remote reachable"
-  fi
-}
-
-fsm_require_state() {
-  local action="$1"
-  shift
-
-  if ! is_truthy "${WF_FSM_ENFORCE:-1}"; then
-    return 0
-  fi
-
-  local state
-  state="$(fsm_get_remote_state)"
-
-  local allowed
-  local ok=0
-  local joined=""
-  for allowed in "$@"; do
-    if [[ -z "$joined" ]]; then
-      joined="$allowed"
-    else
-      joined="$joined,$allowed"
-    fi
-
-    if [[ "$state" == "$allowed" ]]; then
-      ok=1
-    fi
-  done
-
-  if [[ "$ok" != 1 ]]; then
-    die "illegal workflow state for ${action}: current=${state} allowed=[${joined}] (hint: bash infra_scripts/workflow.sh fsm-status)"
-  fi
-}
-
-fsm_update_from_sweep_summary() {
-  local summary_text="$1"
-
-  if ! is_truthy "${WF_FSM_ENFORCE:-1}"; then
-    return 0
-  fi
-
-  local phase
-  phase="$(python3 - <<'PY' "$summary_text"
-import re
-import sys
-
-s = sys.argv[1]
-m = re.search(r"total=(\d+)\s+ok=(\d+)\s+failed=(\d+)\s+in_progress=(\d+)\s+missing_dir=(\d+)\s+parse_error=(\d+)", s)
-if not m:
-    print("unknown")
-    raise SystemExit(0)
-
-total, ok, failed, in_progress, missing_dir, parse_error = map(int, m.groups())
-if in_progress > 0:
-    print("running")
-elif total == ok + failed and missing_dir == 0 and parse_error == 0 and total > 0:
-    print("completed")
-elif failed > 0 or parse_error > 0:
-    print("stalled")
-else:
-    print("unknown")
-PY
-)"
-
-  case "$phase" in
-    stalled)
-      fsm_set_remote_state "SWEEP_STALLED" "sweep-status: stalled"
-      ;;
-    running)
-      fsm_set_remote_state "SWEEP_RUNNING" "sweep-status: in progress"
-      ;;
-    completed)
-      fsm_set_remote_state "SWEEP_COMPLETED" "sweep-status: completed"
-      ;;
-  esac
-}
-
 cmd_banner_full() {
   cat <<'BANNER'
 
@@ -1628,8 +1658,6 @@ cmd_help() {
     task-list          List recent tasks
 
   State:
-    fsm-status         Show current workflow state
-    fsm-reset [STATE]  Force-set state (recovery)
     config-sync        Push config to pod
     checklist-status   Print live workflow checklist
     checklist-reset    Reset checklist to template
@@ -1639,6 +1667,13 @@ cmd_help() {
     Profile:    WORKFLOW_PROFILE=retrieval-sparse-fusion
     Override:   WORKFLOW_CONFIG=/path/to/file (requires WF_ALLOW_OVERRIDE=1)
 
+  Strict Manual Mode:
+    WF_STRICT_MANUAL=1 enables deterministic hard gating.
+    - flow auto-run is blocked unless WF_STRICT_ALLOW_FLOW_AUTORUN=1
+    - mutating commands require WF_STEP_PERMIT_FILE (or WF_PERMIT_FILE)
+    - permit verification requires WF_PERMIT_SECRET
+    - canonical config path is enforced (no override mode)
+
   Internal (remote-only):
     _sweep_run_all     Sequential torchrun sweep engine
     _sweep_status      Progress summary (used by sweep-status)
@@ -1647,7 +1682,7 @@ EOF
 
 is_known_command() {
   case "$1" in
-    help|-h|--help|flow|pod-up|pod-wait|pod-delete|pod-butter|pod-status|config-sync|bootstrap|checkout|task-run|task-status|task-wait|task-list|checklist-status|checklist-reset|sweep-csv-template|workflow-sync|fsm-status|fsm-reset|sweep-start|sweep-status|sweep-watch|fetch-all|fetch-run|local-status|local-push|_sweep_run_all|_sweep_status)
+    help|-h|--help|flow|pod-up|pod-wait|pod-delete|pod-butter|pod-status|config-sync|bootstrap|checkout|task-run|task-status|task-wait|task-list|checklist-status|checklist-reset|sweep-csv-template|workflow-sync|sweep-start|sweep-status|sweep-watch|fetch-all|fetch-run|local-status|local-push|_sweep_run_all|_sweep_status)
       return 0
       ;;
     *)
@@ -1680,8 +1715,6 @@ cmd_task_run() {
   load_config
   config_sync
   require_var OPS_REMOTE_OUTPUTS_DIR
-  fsm_promote_pod_ready_if_needed
-  fsm_require_state "task-run" "POD_READY" "BOOTSTRAPPED" "CHECKED_OUT" "PRECHECKED" "SWEEP_LAUNCHED" "SWEEP_RUNNING" "SWEEP_STALLED" "SWEEP_COMPLETED" "ARTIFACTS_FETCHING" "ARTIFACTS_SYNCED"
 
   local task_id=""
   local task_cmd=""
@@ -2172,11 +2205,6 @@ cmd_pod_wait() {
     # Don't spam output from lium when SSH isn't ready.
     if out="$(remote_exec_raw 'echo pod-ready' 2>&1)"; then
       log "pod is reachable"
-      if [[ -n "${OPS_REMOTE_OUTPUTS_DIR:-}" && -n "${REMOTE_ENV_PATH:-}" ]]; then
-        if config_sync >/dev/null 2>&1; then
-          fsm_set_remote_state "POD_READY" "pod-wait: reachable" || true
-        fi
-      fi
       return 0
     fi
 
@@ -2207,12 +2235,6 @@ cmd_pod_delete() {
 
   if [[ -z "${LIUM_TARGET:-}" ]]; then
     die "pod-delete requires LIUM_TARGET in ${CONFIG_PATH}"
-  fi
-
-  if [[ -n "${OPS_REMOTE_OUTPUTS_DIR:-}" && -n "${REMOTE_ENV_PATH:-}" ]]; then
-    if config_sync >/dev/null 2>&1; then
-      fsm_set_remote_state "POD_TERMINATED" "pod-delete: terminated" || true
-    fi
   fi
 
   log "deleting pod: ${LIUM_TARGET}"
@@ -2277,47 +2299,6 @@ cmd_workflow_sync() {
   config_sync
   cmd_checkout
   log "workflow-sync is deprecated: remote repo is updated via git checkout/pull"
-}
-
-cmd_fsm_status() {
-  load_config
-  config_sync
-  require_var OPS_REMOTE_OUTPUTS_DIR
-
-  local state
-  state="$(fsm_get_remote_state)"
-  echo "state=$state"
-
-  remote_exec_env 'python3 - <<"PY"
-import json
-import os
-
-path = os.environ.get("WF_STATE_FILE") or os.path.join(
-    os.environ["OPS_REMOTE_OUTPUTS_DIR"], "_control", "workflow_state.json"
-)
-print(f"state_file={path}")
-if os.path.exists(path):
-    print("--- workflow_state.json ---")
-    with open(path, "r") as f:
-        print(f.read().rstrip())
-else:
-    print("state_file_missing=1")
-PY'
-}
-
-cmd_fsm_reset() {
-  load_config
-  config_sync
-  require_var OPS_REMOTE_OUTPUTS_DIR
-
-  local state="${1:-INIT}"
-  case "$state" in
-    INIT|POD_READY|BOOTSTRAPPED|CHECKED_OUT|PRECHECKED|SWEEP_LAUNCHED|SWEEP_RUNNING|SWEEP_STALLED|SWEEP_COMPLETED|ARTIFACTS_FETCHING|ARTIFACTS_SYNCED|POD_TERMINATED) ;;
-    *) die "invalid state for fsm-reset: $state" ;;
-  esac
-
-  fsm_set_remote_state "$state" "manual reset"
-  echo "state=$state"
 }
 
 cmd_pod_up() {
@@ -2398,17 +2379,11 @@ cmd_pod_status() {
 
   config_sync
   remote_exec_raw 'echo "[remote] whoami=$(whoami)"; echo "[remote] hostname=$(hostname)"; ls -la /mnt || true'
-
-  if [[ -n "${OPS_REMOTE_OUTPUTS_DIR:-}" ]]; then
-    fsm_set_remote_state "POD_READY" "pod-status: reachable" || true
-  fi
 }
 
 cmd_bootstrap() {
   load_config
   config_sync
-  fsm_promote_pod_ready_if_needed
-  fsm_require_state "bootstrap" "POD_READY" "BOOTSTRAPPED" "CHECKED_OUT" "PRECHECKED" "SWEEP_STALLED" "SWEEP_COMPLETED" "ARTIFACTS_FETCHING" "ARTIFACTS_SYNCED"
 
   remote_exec_env 'command -v tmux >/dev/null 2>&1 || echo "tmux missing"; command -v git >/dev/null 2>&1 || echo "git missing"; command -v python3 >/dev/null 2>&1 || echo "python3 missing"'
 
@@ -2430,14 +2405,11 @@ cmd_bootstrap() {
     fi
   fi
 
-  fsm_set_remote_state "BOOTSTRAPPED" "bootstrap complete"
 }
 
 cmd_checkout() {
   load_config
   config_sync
-  fsm_promote_pod_ready_if_needed
-  fsm_require_state "checkout" "POD_READY" "BOOTSTRAPPED" "CHECKED_OUT" "PRECHECKED" "SWEEP_STALLED" "SWEEP_COMPLETED" "ARTIFACTS_FETCHING" "ARTIFACTS_SYNCED"
 
   require_var OPS_REMOTE_REPO
   require_var OPS_REMOTE_OUTPUTS_DIR
@@ -2579,7 +2551,6 @@ if [[ -n "${CHECKOUT_POST_CMD:-}" ]]; then
 fi
 '
 
-  fsm_set_remote_state "CHECKED_OUT" "checkout complete"
 }
 
 local_csv_path() {
@@ -2658,7 +2629,6 @@ cmd_sweep_start() {
   config_sync
   ensure_remote_workflow_script
   cmd_checkout
-  fsm_require_state "sweep-start" "CHECKED_OUT" "PRECHECKED" "SWEEP_STALLED" "SWEEP_COMPLETED" "ARTIFACTS_FETCHING" "ARTIFACTS_SYNCED"
 
   require_var OPS_REMOTE_OUTPUTS_DIR
 
@@ -2669,8 +2639,6 @@ cmd_sweep_start() {
   csv_remote_latest="$OPS_REMOTE_OUTPUTS_DIR/_manifests/sweep-latest.csv"
   remote_upload "$csv_local" "$csv_remote_latest"
   remote_exec_env "ts=\"\$(date +%Y%m%d-%H%M%S)\"; cp -f \"$csv_remote_latest\" \"$OPS_REMOTE_OUTPUTS_DIR/_manifests/sweep-\${ts}.csv\"; cp -f \"$REMOTE_ENV_PATH\" \"$OPS_REMOTE_OUTPUTS_DIR/_manifests/workflow-\${ts}.env\""
-
-  fsm_set_remote_state "PRECHECKED" "sweep-start: preflight complete"
 
   require_var SWEEP_TMUX_SESSION
   local workflow_remote
@@ -2688,7 +2656,6 @@ echo "tmux attach -t \$session"
 EOF
 )"
   remote_exec_env "$tmux_cmd"
-  fsm_set_remote_state "SWEEP_LAUNCHED" "sweep-start launched"
 }
 
 strip_quotes() {
@@ -3228,8 +3195,6 @@ cmd_sweep_status() {
   load_config
   config_sync
   ensure_remote_workflow_script
-  fsm_promote_pod_ready_if_needed
-  fsm_require_state "sweep-status" "CHECKED_OUT" "PRECHECKED" "SWEEP_LAUNCHED" "SWEEP_RUNNING" "SWEEP_STALLED" "SWEEP_COMPLETED" "ARTIFACTS_FETCHING" "ARTIFACTS_SYNCED"
 
   local workflow_remote
   workflow_remote="$(remote_workflow_path)"
@@ -3237,7 +3202,6 @@ cmd_sweep_status() {
   local status_out
   status_out="$(remote_exec_env "csv_latest=\"$OPS_REMOTE_OUTPUTS_DIR/_manifests/sweep-latest.csv\"; cd \"$OPS_REMOTE_REPO\" && if [[ -f \"\$csv_latest\" ]]; then WORKFLOW_CONFIG=\"$REMOTE_ENV_PATH\" bash \"$workflow_remote\" _sweep_status --csv \"\$csv_latest\"; else WORKFLOW_CONFIG=\"$REMOTE_ENV_PATH\" bash \"$workflow_remote\" _sweep_status; fi")"
   printf '%s\n' "$status_out"
-  fsm_update_from_sweep_summary "$status_out"
 
   remote_exec_env 'echo "attach:"; echo "tmux attach -t $SWEEP_TMUX_SESSION"; tmux ls || true'
 }
@@ -3245,8 +3209,6 @@ cmd_sweep_status() {
 cmd_sweep_watch() {
   load_config
   config_sync
-  fsm_promote_pod_ready_if_needed
-  fsm_require_state "sweep-watch" "CHECKED_OUT" "PRECHECKED" "SWEEP_LAUNCHED" "SWEEP_RUNNING" "SWEEP_STALLED" "SWEEP_COMPLETED" "ARTIFACTS_FETCHING" "ARTIFACTS_SYNCED"
 
   local tail_lines=10
   while [[ $# -gt 0 ]]; do
@@ -3518,26 +3480,16 @@ PY
   stall_reason="${stall_reason_line#stall_reason=}"
   printf '%s\n' "$stalled_line"
   printf '%s\n' "$stall_reason_line"
-
-  if [[ "$stalled_flag" == "yes" ]]; then
-    fsm_set_remote_state "SWEEP_STALLED" "sweep-watch: ${stall_reason:-stalled}" || true
-  elif [[ -n "$summary_line" ]]; then
-    fsm_update_from_sweep_summary "$summary_line"
-  fi
 }
 
 cmd_fetch_run() {
   load_config
   config_sync
-  fsm_promote_pod_ready_if_needed
-  fsm_require_state "fetch-run" "CHECKED_OUT" "PRECHECKED" "SWEEP_LAUNCHED" "SWEEP_RUNNING" "SWEEP_STALLED" "SWEEP_COMPLETED" "ARTIFACTS_FETCHING" "ARTIFACTS_SYNCED"
   require_var OPS_REMOTE_OUTPUTS_DIR
   require_var LOCAL_ARTIFACTS_DIR
 
   local run_id="${1:-}"
   [[ -n "$run_id" ]] || die "usage: fetch-run <run_id>"
-
-  fsm_set_remote_state "ARTIFACTS_FETCHING" "fetch-run: ${run_id}" || true
 
   local tmp_remote="/tmp/${run_id}.tar.gz"
   local tmp_local="${LOCAL_ARTIFACTS_DIR}/${run_id}.tar.gz"
@@ -3559,12 +3511,6 @@ cmd_fetch_run() {
     sync_phase="$(artifacts_sync_phase_for_csv "$csv_local" "$LOCAL_ARTIFACTS_DIR")"
   else
     sync_phase="unknown"
-  fi
-
-  if [[ "$sync_phase" == "synced" ]]; then
-    fsm_set_remote_state "ARTIFACTS_SYNCED" "fetch-run: local manifest artifacts synced"
-  else
-    fsm_set_remote_state "ARTIFACTS_FETCHING" "fetch-run: local artifacts partial"
   fi
 
   log "fetched: ${LOCAL_ARTIFACTS_DIR}/${run_id}/"
@@ -3678,6 +3624,7 @@ main() {
 
   if [[ "$cmd" != "help" && "$cmd" != "-h" && "$cmd" != "--help" ]]; then
     constitution_preflight "$cmd"
+    wf_strict_pre_dispatch_guard "$cmd" "$@"
   fi
 
   case "$cmd" in
@@ -3699,8 +3646,6 @@ main() {
     checklist-reset) cmd_checklist_reset "$@" ;;
     sweep-csv-template) cmd_sweep_csv_template "$@" ;;
     workflow-sync) cmd_workflow_sync "$@" ;;
-    fsm-status) cmd_fsm_status "$@" ;;
-    fsm-reset) cmd_fsm_reset "$@" ;;
     sweep-start) cmd_sweep_start "$@" ;;
     sweep-status) cmd_sweep_status "$@" ;;
     sweep-watch) cmd_sweep_watch "$@" ;;

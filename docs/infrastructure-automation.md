@@ -39,6 +39,7 @@ Required basics:
 
 - `REPO_URL` - Git URL of the research repository to run
 - `OPS_REMOTE_REPO` - remote checkout directory
+- `OPS_LOCAL_REPO` - local editable checkout directory (for `local-status` / `local-push`)
 - target/pod variables (`LIUM_*` or fallback host values)
 
 Recommended safety settings:
@@ -90,6 +91,8 @@ baseline-seed0,config/train_baseline.py,0,"max_iters=20 eval_interval=10 eval_it
 ./steed sweep-watch
 ./steed fetch-run <run_id>
 ./steed fetch-all
+./steed local-status
+./steed local-push --remote origin --branch main
 ```
 
 ## Artifacts

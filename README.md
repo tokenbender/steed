@@ -19,6 +19,7 @@ This repo is intentionally generic and can be used with any research repository.
    - Example profile: `infra_scripts/workflow/retrieval-sparse-fusion.cfg`.
    - Set `REPO_URL` to your research repo.
    - Set `OPS_REMOTE_REPO` to remote checkout path.
+   - Set `OPS_LOCAL_REPO` to your local editable checkout path.
    - Adjust pod settings, timeouts, and artifact paths.
 
 2. Configure training execution.
@@ -35,6 +36,13 @@ This repo is intentionally generic and can be used with any research repository.
 
 ```bash
 ./steed flow --sweep start --fetch all --teardown delete
+```
+
+5. Example: work from local checkout and push:
+
+```bash
+WORKFLOW_PROFILE=retrieval-sparse-fusion ./steed local-status
+WORKFLOW_PROFILE=retrieval-sparse-fusion ./steed local-push --set-upstream
 ```
 
 ## Generic Training Hook

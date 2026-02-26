@@ -201,6 +201,18 @@ resolve_local_path() {
   echo "${REPO_ROOT}/${path}"
 }
 
+local_repo_path() {
+  load_config
+  local configured="${OPS_LOCAL_REPO:-}"
+  [[ -n "$configured" ]] || die "missing required config: OPS_LOCAL_REPO (set it in ${CONFIG_PATH})"
+
+  local resolved
+  resolved="$(resolve_local_path "$configured")"
+  [[ -d "$resolved" ]] || die "local repo path does not exist: ${resolved}"
+  git -C "$resolved" rev-parse --is-inside-work-tree >/dev/null 2>&1 || die "not a git repository: ${resolved}"
+  echo "$resolved"
+}
+
 checklist_path() {
   local configured="${WF_CHECKLIST_PATH:-infra_scripts/workflow.checklist.md}"
   resolve_local_path "$configured"
@@ -1602,6 +1614,13 @@ cmd_help() {
     fetch-run <id>     Download a single run's artifacts
     fetch-all          Download all runs from manifest
 
+  Local Repo:
+    local-status       Show configured local repo path + git status
+    local-push         Push a branch from configured local repo
+                       options: --remote <name> (default: origin),
+                                --branch <name> (default: current branch),
+                                --set-upstream
+
   Tasks:
     task-run           Run a tracked remote task in tmux
     task-status        Show task status and tail logs
@@ -1628,7 +1647,7 @@ EOF
 
 is_known_command() {
   case "$1" in
-    help|-h|--help|flow|pod-up|pod-wait|pod-delete|pod-butter|pod-status|config-sync|bootstrap|checkout|task-run|task-status|task-wait|task-list|checklist-status|checklist-reset|sweep-csv-template|workflow-sync|fsm-status|fsm-reset|sweep-start|sweep-status|sweep-watch|fetch-all|fetch-run|_sweep_run_all|_sweep_status)
+    help|-h|--help|flow|pod-up|pod-wait|pod-delete|pod-butter|pod-status|config-sync|bootstrap|checkout|task-run|task-status|task-wait|task-list|checklist-status|checklist-reset|sweep-csv-template|workflow-sync|fsm-status|fsm-reset|sweep-start|sweep-status|sweep-watch|fetch-all|fetch-run|local-status|local-push|_sweep_run_all|_sweep_status)
       return 0
       ;;
     *)
@@ -3576,6 +3595,71 @@ PY
 )
 }
 
+cmd_local_status() {
+  local repo
+  repo="$(local_repo_path)"
+
+  local branch
+  branch="$(git -C "$repo" branch --show-current 2>/dev/null || true)"
+  local upstream
+  upstream="$(git -C "$repo" rev-parse --abbrev-ref --symbolic-full-name @{upstream} 2>/dev/null || true)"
+  local origin
+  origin="$(git -C "$repo" remote get-url origin 2>/dev/null || true)"
+
+  echo "local_repo=$repo"
+  echo "branch=${branch:--}"
+  echo "upstream=${upstream:--}"
+  echo "origin=${origin:--}"
+  echo "--- status --short ---"
+  git -C "$repo" status --short
+  echo "--- last commit ---"
+  git -C "$repo" log --oneline -1
+}
+
+cmd_local_push() {
+  local repo
+  repo="$(local_repo_path)"
+
+  local remote="origin"
+  local branch=""
+  local set_upstream=0
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --remote)
+        remote="$2"
+        shift 2
+        ;;
+      --branch)
+        branch="$2"
+        shift 2
+        ;;
+      --set-upstream)
+        set_upstream=1
+        shift
+        ;;
+      *)
+        die "unknown arg for local-push: $1"
+        ;;
+    esac
+  done
+
+  if [[ -z "$branch" ]]; then
+    branch="$(git -C "$repo" branch --show-current 2>/dev/null || true)"
+  fi
+  [[ -n "$branch" ]] || die "unable to determine branch for local-push (use --branch)"
+
+  git -C "$repo" remote get-url "$remote" >/dev/null 2>&1 || die "remote not found in local repo: ${remote}"
+
+  echo "local_repo=$repo"
+  echo "pushing branch=${branch} remote=${remote}"
+  if [[ "$set_upstream" == "1" ]]; then
+    git -C "$repo" push -u "$remote" "$branch"
+  else
+    git -C "$repo" push "$remote" "$branch"
+  fi
+}
+
 main() {
   # No args: show full banner; explicit help: show compact help
   if [[ $# -eq 0 ]]; then
@@ -3622,6 +3706,8 @@ main() {
     sweep-watch) cmd_sweep_watch "$@" ;;
     fetch-all) cmd_fetch_all "$@" ;;
     fetch-run) cmd_fetch_run "$@" ;;
+    local-status) cmd_local_status "$@" ;;
+    local-push) cmd_local_push "$@" ;;
     _sweep_run_all) cmd__sweep_run_all "$@" ;;
     _sweep_status) cmd__sweep_status "$@" ;;
   esac

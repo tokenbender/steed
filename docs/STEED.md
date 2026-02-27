@@ -63,7 +63,7 @@ It does not conduct research. It does not design experiments. It simply carries 
 ## What Steed Is Not
 
 - **Steed is not intelligent.** It does not optimize your learning rate or suggest architecture changes. That remains your domain.
-- **Steed is not autonomous.** It requires direction—a CSV manifest, a configuration file, a clear destination.
+- **Steed is not implicitly autonomous.** The runtime executes explicit commands. Autonomous behavior is opt-in and bounded by policy (time/budget), while manual mode is deny-by-default for mutating actions.
 - **Steed is not a black box.** Every step produces evidence: logs, JSON artifacts, deterministic checkpoints. The journey is auditable.
 - **Steed is not a substitute for understanding.** You should know what it's doing. But you shouldn't have to babysit it.
 
@@ -77,15 +77,15 @@ Given a manifest and configuration, Steed executes exactly what was requested. N
 
 ### 2. Evidence Over Trust
 
-Every phase produces artifacts. The system does not ask you to trust that provisioning succeeded—it writes `phase.P10.evidence.json`. It does not claim the sweep completed—it shows you `summary.json` with exit codes.
+Evidence is canonical and machine-readable. Flow execution writes a single `flow.state.json` artifact with per-phase entries, deterministic verdicts, and final summary. Sweep runs emit `summary.json` and `stdout.log`. Policy denials emit structured payloads (reason code + desired action) for deterministic recovery loops.
 
 ### 3. Graceful Degradation
 
 When things go wrong—and they will—Steed fails visibly and informatively. A stalled sweep is detected and reported. A failed run is logged with its exit code. Nothing fails silently.
 
-### 4. State as Contract
+### 4. Policy as Contract
 
-The finite state machine (FSM) is not just bookkeeping. It is a contract: you cannot launch a sweep before checkout completes. You cannot fetch artifacts before the sweep finishes. These constraints protect you from yourself.
+The contract is enforced at the gate. In manual mode, mutating actions require signed one-shot permits. In autonomous mode, execution is bounded by explicit TTL and mutation budgets. Violations are denied with deterministic reason codes, not fuzzy behavior.
 
 ### 5. The Single Command Journey
 
@@ -93,7 +93,7 @@ The finite state machine (FSM) is not just bookkeeping. It is a contract: you ca
 steed flow --sweep start --fetch all --teardown delete
 ```
 
-One command. The entire journey: provision, execute, retrieve, cleanup. This is the promise: you define the destination, Steed handles the terrain.
+One command can still run the full journey: provision, execute, retrieve, cleanup. In manual permit workflows, the same journey is executed step-by-step with explicit permits. Both paths keep the contract: you define the destination, Steed handles the terrain.
 
 ---
 

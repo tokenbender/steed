@@ -1,71 +1,93 @@
 # steed
 
-Steed is a standalone research-infrastructure orchestrator.
+Steed is a deterministic research-infrastructure runtime with a plugin-first policy gate for controlled execution.
 
-It manages the full lifecycle for experiment campaigns:
+## Architecture
 
-- provision/attach compute target
-- bootstrap + checkout a research repo
-- launch sweep runs from CSV
-- monitor progress and collect artifacts
-- teardown and summarize with phase evidence
+Steed is split into two layers:
 
-This repo is intentionally generic and can be used with any research repository.
+- Control plane: `packages/opencode-steed-gate` (OpenCode plugin)
+- Data plane: `steed` + `infra_scripts/workflow.sh` (runtime executor)
 
-## Quick Start
+The plugin decides whether an action is allowed. The runtime executes and writes artifacts.
 
-1. Choose/edit a profile config in `infra_scripts/workflow/<profile>.cfg`.
-   - Default profile: `infra_scripts/workflow/default.cfg`.
-   - Example profile: `infra_scripts/workflow/retrieval-sparse-fusion.cfg`.
-   - Set `REPO_URL` to your research repo.
-   - Set `OPS_REMOTE_REPO` to remote checkout path.
-   - Set `OPS_LOCAL_REPO` to your local editable checkout path.
-   - Adjust pod settings, timeouts, and artifact paths.
+## Quick Start (Plugin-First)
 
-2. Configure training execution.
-   - Set `TRAIN_WORKDIR_REL` (relative path under `OPS_REMOTE_REPO`).
-   - Optionally set `TRAIN_COMMAND_TEMPLATE` for arbitrary training entrypoints.
+1. Install the plugin and global helper commands:
 
-3. Create a sweep manifest:
+```bash
+bash scripts/install-opencode-steed-gate.sh
+```
+
+2. Restart OpenCode so the plugin loader is picked up.
+
+3. Initialize scope in your project:
+
+```text
+/steed-gate-init
+```
+
+4. Configure a profile in `infra_scripts/workflow/<profile>.cfg`:
+   - set `REPO_URL`
+   - set `OPS_REMOTE_REPO`
+   - set `OPS_LOCAL_REPO`
+   - configure target/pod values (`LIUM_*` or fallback host)
+
+5. Generate sweep CSV if needed:
 
 ```bash
 ./steed sweep-csv-template
 ```
 
-4. Run a full campaign:
+6. In manual mode, generate a permit for each mutating step:
 
-```bash
-./steed flow --sweep start --fetch all --teardown delete
+```text
+/steed-permit steed checkout
 ```
 
-5. Example: work from local checkout and push:
+The default permit path is `.opencode/steed-gate/permit.json`.
+The command uses the installer-managed global secret file by default.
+
+## Runtime Commands
 
 ```bash
-WORKFLOW_PROFILE=retrieval-sparse-fusion ./steed local-status
-WORKFLOW_PROFILE=retrieval-sparse-fusion ./steed local-push --set-upstream
+./steed --help
+./steed flow --sweep start --fetch all --teardown delete
+./steed sweep-status
+./steed sweep-watch
+./steed fetch-run <run_id>
+./steed fetch-all
 ```
 
 ## Generic Training Hook
 
-If `TRAIN_COMMAND_TEMPLATE` is set, Steed executes it with `bash -lc` and provides these variables:
+If `TRAIN_COMMAND_TEMPLATE` is set, Steed executes it with `bash -lc` and exposes:
 
 - `RUN_ID`, `CONFIG`, `SEED`, `TRAIN_OUT_DIR`, `NPROC_PER_NODE`
 - `DATA_DIR`, `HF_HOME`, `OVERRIDES`
 - `WANDB_LOG`, `WANDB_PROJECT`, `WANDB_GROUP_VALUE`, `WANDB_RUN_NAME`
 - `OPS_REMOTE_REPO`, `VENV_PYTHON`
 
-Example:
+## Artifacts
 
-```bash
-TRAIN_WORKDIR_REL="."
-TRAIN_COMMAND_TEMPLATE='"${VENV_PYTHON}" -m torch.distributed.run --standalone --nproc_per_node="${NPROC_PER_NODE}" train.py "${CONFIG}" output_dir="${TRAIN_OUT_DIR}" seed="${SEED}" ${OVERRIDES}'
-```
+- Flow-level canonical artifact:
+  - `artifacts/pod_logs/_flows/<flow_id>/flow.state.json`
+- Flow checklist:
+  - `infra_scripts/workflow.checklist.md` (reset on flow end by default)
+- Per-run artifacts:
+  - `status.json`, `summary.json`, `stdout.log`
+- Plugin policy artifacts:
+  - `${XDG_CONFIG_HOME:-~/.config}/opencode/steed-gate/audit/events.jsonl`
+  - `${XDG_CONFIG_HOME:-~/.config}/opencode/steed-gate/deny/*`
+  - `${XDG_CONFIG_HOME:-~/.config}/opencode/steed-gate/permits/permits.used.jsonl`
 
 ## Key Files
 
 - `steed` - CLI entrypoint
-- `infra_scripts/workflow.sh` - main orchestrator
-- `infra_scripts/workflow/` - runtime profile configurations (`<profile>.cfg`)
-- `infra_scripts/workflow.cfg` - legacy compatibility shim (sources `workflow/default.cfg`)
-- `docs/infrastructure-automation.md` - operational reference
-- `docs/STEED.md` - manifesto/philosophy
+- `infra_scripts/workflow.sh` - orchestrator/runtime
+- `infra_scripts/workflow/` - profile configs
+- `packages/opencode-steed-gate/` - OpenCode policy plugin
+- `scripts/install-opencode-steed-gate.sh` - global plugin installer
+- `scripts/create-steed-permit.py` - signed permit generator
+- `docs/infrastructure-automation.md` - operational guide
+- `docs/STEED.md` - manifesto

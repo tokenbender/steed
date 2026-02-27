@@ -1,0 +1,18 @@
+{
+  "name": "opencode-steed-gate",
+  "version": "0.1.0",
+  "description": "Deterministic Steed policy gate plugin for OpenCode",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.js"
+  },
+  "files": [
+    "src",
+    "index.js",
+    "README.md"
+  ],
+  "license": "MIT",
+  "peerDependencies": {
+    "@opencode-ai/plugin": "*"
+  }
+}

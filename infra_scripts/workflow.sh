@@ -82,218 +82,6 @@ file_sha256() {
   echo "unavailable"
 }
 
-wf_deny() {
-  local code="$1"
-  shift || true
-  local message="$*"
-  printf 'wf-policy-deny code=%s message=%s\n' "$code" "$message" >&2
-  exit 42
-}
-
-wf_args_sha256() {
-  python3 - <<'PY' "$@"
-import hashlib
-import json
-import sys
-
-payload = json.dumps(sys.argv[1:], ensure_ascii=True, separators=(",", ":"))
-print(hashlib.sha256(payload.encode("utf-8")).hexdigest())
-PY
-}
-
-wf_is_internal_command() {
-  local cmd="$1"
-  [[ "$cmd" == _* ]]
-}
-
-wf_is_mutating_command() {
-  local cmd="$1"
-  case "$cmd" in
-    flow|pod-up|pod-delete|pod-butter|config-sync|bootstrap|checkout|workflow-sync|sweep-start|fetch-all|fetch-run|checklist-reset|task-run|local-push)
-      return 0
-      ;;
-    *)
-      return 1
-      ;;
-  esac
-}
-
-wf_is_strict_core_command() {
-  local cmd="$1"
-  case "$cmd" in
-    flow|pod-up|pod-wait|pod-status|pod-delete|config-sync|bootstrap|checkout|sweep-start|sweep-status|fetch-all|fetch-run|checklist-status|_sweep_run_all|_sweep_status)
-      return 0
-      ;;
-    *)
-      return 1
-      ;;
-  esac
-}
-
-wf_require_step_permit() {
-  local cmd="$1"
-  shift || true
-
-  local permit_path="${WF_STEP_PERMIT_FILE:-${WF_PERMIT_FILE:-}}"
-  [[ -n "$permit_path" ]] || wf_deny "DENY_MANUAL_APPROVAL_MISSING" "set WF_STEP_PERMIT_FILE or WF_PERMIT_FILE for command=${cmd}"
-  [[ -f "$permit_path" ]] || wf_deny "DENY_PERMIT_FILE_MISSING" "permit file not found: ${permit_path}"
-
-  local permit_secret="${WF_PERMIT_SECRET:-}"
-  if [[ -z "$permit_secret" || "$permit_secret" == "CHANGE_ME" ]]; then
-    wf_deny "DENY_PERMIT_SECRET_MISSING" "set WF_PERMIT_SECRET to verify signed permits"
-  fi
-
-  local now_epoch
-  now_epoch="$(date +%s)"
-  local args_sha
-  args_sha="$(wf_args_sha256 "$@")"
-  local config_sha
-  config_sha="$(file_sha256 "$CONFIG_PATH")"
-
-  local skew_secs="${WF_PERMIT_CLOCK_SKEW_SECS:-0}"
-  [[ "$skew_secs" =~ ^[0-9]+$ ]] || wf_deny "DENY_PERMIT_POLICY_INVALID" "WF_PERMIT_CLOCK_SKEW_SECS must be integer"
-
-  local ledger_dir
-  ledger_dir="$(resolve_local_path "${WF_PERMIT_LEDGER_DIR:-artifacts/policy/permits}")"
-  mkdir -p "$ledger_dir"
-
-  local verdict
-  if ! verdict="$(WF_PERMIT_SECRET_VALUE="$permit_secret" python3 - <<'PY' "$permit_path" "$cmd" "$args_sha" "$config_sha" "$now_epoch" "$skew_secs" "$ledger_dir"
-import hashlib
-import hmac
-import json
-import os
-import pathlib
-import re
-import sys
-
-permit_path, command, args_sha, config_sha, now_epoch, skew_secs, ledger_dir = sys.argv[1:]
-now_epoch_i = int(now_epoch)
-skew_i = int(skew_secs)
-secret = os.environ.get("WF_PERMIT_SECRET_VALUE", "")
-
-
-def deny(code: str, message: str) -> None:
-    print(f"DENY|{code}|{message}")
-    raise SystemExit(0)
-
-
-def require_field(payload: dict, name: str):
-    value = payload.get(name)
-    if value is None:
-        deny("DENY_PERMIT_PARSE_ERROR", f"missing field: {name}")
-    return value
-
-
-try:
-    permit = json.loads(pathlib.Path(permit_path).read_text())
-except FileNotFoundError:
-    deny("DENY_PERMIT_FILE_MISSING", f"permit file not found: {permit_path}")
-except Exception as exc:
-    deny("DENY_PERMIT_PARSE_ERROR", f"invalid permit JSON: {exc}")
-
-step_id = str(require_field(permit, "step_id")).strip()
-permit_command = str(require_field(permit, "command")).strip()
-permit_args_sha = str(require_field(permit, "args_sha256")).strip()
-permit_config_sha = str(require_field(permit, "config_sha256")).strip()
-nonce = str(require_field(permit, "nonce")).strip()
-signature = str(require_field(permit, "signature")).strip()
-
-expires_raw = require_field(permit, "expires_at_epoch")
-try:
-    expires_at = int(str(expires_raw))
-except Exception:
-    deny("DENY_PERMIT_PARSE_ERROR", "expires_at_epoch must be an integer")
-
-if not step_id:
-    deny("DENY_PERMIT_PARSE_ERROR", "step_id cannot be empty")
-
-if permit_command != command:
-    deny("DENY_COMMAND_NOT_ALLOWED", f"permit command={permit_command} requested={command}")
-
-if permit_args_sha != args_sha:
-    deny("DENY_ARGS_HASH_MISMATCH", "permit args_sha256 does not match requested args")
-
-if permit_config_sha != config_sha:
-    deny("DENY_CONFIG_HASH_MISMATCH", "permit config_sha256 does not match active config")
-
-if now_epoch_i > (expires_at + skew_i):
-    deny("DENY_PERMIT_EXPIRED", f"permit expired at epoch={expires_at}")
-
-if not re.fullmatch(r"[A-Za-z0-9._-]{1,128}", nonce):
-    deny("DENY_PERMIT_PARSE_ERROR", "nonce format invalid")
-
-if not re.fullmatch(r"[0-9a-fA-F]{64}", signature):
-    deny("DENY_PERMIT_PARSE_ERROR", "signature must be 64 hex chars")
-
-payload = "|".join([
-    step_id,
-    permit_command,
-    permit_args_sha,
-    permit_config_sha,
-    str(expires_at),
-    nonce,
-])
-expected = hmac.new(secret.encode("utf-8"), payload.encode("utf-8"), hashlib.sha256).hexdigest()
-if not hmac.compare_digest(signature.lower(), expected.lower()):
-    deny("DENY_SIGNATURE_INVALID", "permit signature verification failed")
-
-used_path = pathlib.Path(ledger_dir) / f"{nonce}.used.json"
-if used_path.exists():
-    deny("DENY_PERMIT_REPLAY", f"nonce already consumed: {nonce}")
-
-used_path.parent.mkdir(parents=True, exist_ok=True)
-record = {
-    "step_id": step_id,
-    "command": command,
-    "args_sha256": args_sha,
-    "config_sha256": config_sha,
-    "nonce": nonce,
-    "permit_path": str(pathlib.Path(permit_path).resolve()),
-    "validated_at_epoch": now_epoch_i,
-}
-used_path.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n")
-
-print(f"ALLOW|{step_id}|{nonce}")
-PY
-)"; then
-    wf_deny "DENY_PERMIT_PARSE_ERROR" "permit verification failed unexpectedly"
-  fi
-
-  local status code detail
-  IFS='|' read -r status code detail <<<"$verdict"
-  if [[ "$status" != "ALLOW" ]]; then
-    wf_deny "$code" "$detail"
-  fi
-
-  log "strict permit accepted: step_id=${code} nonce=${detail} command=${cmd}"
-}
-
-wf_strict_pre_dispatch_guard() {
-  local cmd="$1"
-  shift || true
-
-  if ! is_truthy "${WF_STRICT_MANUAL:-0}"; then
-    return 0
-  fi
-
-  if wf_is_internal_command "$cmd"; then
-    return 0
-  fi
-
-  if [[ "$cmd" == "flow" ]] && ! is_truthy "${WF_STRICT_ALLOW_FLOW_AUTORUN:-0}"; then
-    wf_deny "DENY_FLOW_AUTOMATION_BLOCKED" "strict mode blocks flow auto-run; execute explicit phase commands with permits"
-  fi
-
-  if ! wf_is_strict_core_command "$cmd"; then
-    wf_deny "DENY_NON_CORE_COMMAND" "strict mode blocks command=${cmd}; allowed core lifecycle commands only"
-  fi
-
-  if wf_is_mutating_command "$cmd"; then
-    wf_require_step_permit "$cmd" "$@"
-  fi
-}
-
 run_with_timeout() {
   local timeout_secs="$1"
   shift
@@ -388,12 +176,6 @@ enforce_noninteractive_policy() {
 constitution_preflight() {
   local cmd="$1"
   load_config
-
-  if is_truthy "${WF_STRICT_MANUAL:-0}"; then
-    if [[ "$WF_ACTIVE_CONFIG_REALPATH" != "$CANONICAL_CONFIG_PATH" ]]; then
-      die "strict mode requires canonical config path: ${CANONICAL_CONFIG_PATH}"
-    fi
-  fi
 
   if [[ "${WF_CONSTITUTION_VERSION:-1}" != "1" ]]; then
     die "unsupported WF_CONSTITUTION_VERSION=${WF_CONSTITUTION_VERSION:-unset} (expected: 1)"
@@ -1371,19 +1153,6 @@ cmd_flow() {
 }
 
 load_config() {
-  local strict_manual_env_set="${WF_STRICT_MANUAL+x}"
-  local strict_manual_env_value="${WF_STRICT_MANUAL-}"
-  local strict_flow_env_set="${WF_STRICT_ALLOW_FLOW_AUTORUN+x}"
-  local strict_flow_env_value="${WF_STRICT_ALLOW_FLOW_AUTORUN-}"
-  local permit_file_env_set="${WF_STEP_PERMIT_FILE+x}"
-  local permit_file_env_value="${WF_STEP_PERMIT_FILE-}"
-  local permit_secret_env_set="${WF_PERMIT_SECRET+x}"
-  local permit_secret_env_value="${WF_PERMIT_SECRET-}"
-  local permit_skew_env_set="${WF_PERMIT_CLOCK_SKEW_SECS+x}"
-  local permit_skew_env_value="${WF_PERMIT_CLOCK_SKEW_SECS-}"
-  local permit_ledger_env_set="${WF_PERMIT_LEDGER_DIR+x}"
-  local permit_ledger_env_value="${WF_PERMIT_LEDGER_DIR-}"
-
   if [[ ! -f "$CONFIG_PATH" ]]; then
     die "config file not found: ${CONFIG_PATH}"
   fi
@@ -1395,25 +1164,6 @@ load_config() {
 
   # shellcheck disable=SC1090
   source "$CONFIG_PATH"
-
-  if [[ -n "$strict_manual_env_set" ]]; then
-    WF_STRICT_MANUAL="$strict_manual_env_value"
-  fi
-  if [[ -n "$strict_flow_env_set" ]]; then
-    WF_STRICT_ALLOW_FLOW_AUTORUN="$strict_flow_env_value"
-  fi
-  if [[ -n "$permit_file_env_set" ]]; then
-    WF_STEP_PERMIT_FILE="$permit_file_env_value"
-  fi
-  if [[ -n "$permit_secret_env_set" ]]; then
-    WF_PERMIT_SECRET="$permit_secret_env_value"
-  fi
-  if [[ -n "$permit_skew_env_set" ]]; then
-    WF_PERMIT_CLOCK_SKEW_SECS="$permit_skew_env_value"
-  fi
-  if [[ -n "$permit_ledger_env_set" ]]; then
-    WF_PERMIT_LEDGER_DIR="$permit_ledger_env_value"
-  fi
 
   if [[ "${WF_ACTIVE_COMMAND:-}" != _* && "$WF_ACTIVE_CONFIG_REALPATH" != "$CANONICAL_CONFIG_PATH" ]]; then
     if ! is_truthy "${WF_ALLOW_OVERRIDE:-0}"; then
@@ -1666,13 +1416,6 @@ cmd_help() {
     Canonical:  infra_scripts/workflow/<profile>.cfg (default profile: default)
     Profile:    WORKFLOW_PROFILE=retrieval-sparse-fusion
     Override:   WORKFLOW_CONFIG=/path/to/file (requires WF_ALLOW_OVERRIDE=1)
-
-  Strict Manual Mode:
-    WF_STRICT_MANUAL=1 enables deterministic hard gating.
-    - flow auto-run is blocked unless WF_STRICT_ALLOW_FLOW_AUTORUN=1
-    - mutating commands require WF_STEP_PERMIT_FILE (or WF_PERMIT_FILE)
-    - permit verification requires WF_PERMIT_SECRET
-    - canonical config path is enforced (no override mode)
 
   Internal (remote-only):
     _sweep_run_all     Sequential torchrun sweep engine
@@ -3624,7 +3367,6 @@ main() {
 
   if [[ "$cmd" != "help" && "$cmd" != "-h" && "$cmd" != "--help" ]]; then
     constitution_preflight "$cmd"
-    wf_strict_pre_dispatch_guard "$cmd" "$@"
   fi
 
   case "$cmd" in

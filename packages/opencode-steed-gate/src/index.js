@@ -10,7 +10,7 @@ import {
   isReadonlyAction,
   isSteedScopedAction,
 } from "./policy.js"
-import { callKeyFor, createRuntimeState } from "./state.js"
+import { callKeyFor, createRuntimeState, deactivateAutoWindow, ensureAutoWindow } from "./state.js"
 import { nowEpoch } from "./utils.js"
 
 async function safeAudit(config, event) {
@@ -61,11 +61,11 @@ async function denyAndThrow({ config, input, action, code, message }) {
 }
 
 export const SteedGatePlugin = async ({ worktree }) => {
-  const config = loadGateConfig({ worktree })
-  const runtime = createRuntimeState(config)
+  const runtime = createRuntimeState()
 
   return {
     "tool.execute.before": async (input, output) => {
+      const config = loadGateConfig({ worktree })
       const action = await extractAction({ input, output, worktree: config.worktree })
       const callKey = callKeyFor(input)
 
@@ -74,17 +74,22 @@ export const SteedGatePlugin = async ({ worktree }) => {
         runtime.calls.set(callKey, {
           scoped: false,
           tool: action.tool,
+          config,
         })
         return
       }
 
       if (isReadonlyAction(action)) {
+        if (config.mode !== "auto") {
+          deactivateAutoWindow(runtime)
+        }
         runtime.calls.set(callKey, {
           scoped: true,
           action,
           mode: config.mode,
           permit: null,
           mutable: false,
+          config,
         })
         await safeAudit(config, {
           hook: "tool.execute.before",
@@ -102,7 +107,7 @@ export const SteedGatePlugin = async ({ worktree }) => {
         return
       }
 
-      if (isFlowAutorunBlocked(action, config)) {
+      if (config.mode === "auto" && isFlowAutorunBlocked(action, config)) {
         await denyAndThrow({
           config,
           input,
@@ -112,7 +117,7 @@ export const SteedGatePlugin = async ({ worktree }) => {
         })
       }
 
-      if (isNonCoreSteedCommand(action)) {
+      if (config.mode === "auto" && isNonCoreSteedCommand(action)) {
         await denyAndThrow({
           config,
           input,
@@ -123,8 +128,9 @@ export const SteedGatePlugin = async ({ worktree }) => {
       }
 
       if (config.mode === "auto") {
+        const autoWindow = ensureAutoWindow(runtime, config)
         const now = nowEpoch()
-        if (now > runtime.auto.expiresAtEpoch) {
+        if (now > autoWindow.expiresAtEpoch) {
           await denyAndThrow({
             config,
             input,
@@ -134,7 +140,7 @@ export const SteedGatePlugin = async ({ worktree }) => {
           })
         }
 
-        if (runtime.auto.mutationCount >= config.autoMaxMutations) {
+        if (autoWindow.mutationCount >= config.autoMaxMutations) {
           await denyAndThrow({
             config,
             input,
@@ -144,13 +150,14 @@ export const SteedGatePlugin = async ({ worktree }) => {
           })
         }
 
-        runtime.auto.mutationCount += 1
+        autoWindow.mutationCount += 1
         runtime.calls.set(callKey, {
           scoped: true,
           action,
           mode: config.mode,
           permit: null,
           mutable: true,
+          config,
         })
 
         await safeAudit(config, {
@@ -166,10 +173,39 @@ export const SteedGatePlugin = async ({ worktree }) => {
           mode: config.mode,
           scoped: true,
           auto: {
-            mutation_count: runtime.auto.mutationCount,
+            mutation_count: autoWindow.mutationCount,
             max_mutations: config.autoMaxMutations,
-            expires_at_epoch: runtime.auto.expiresAtEpoch,
+            expires_at_epoch: autoWindow.expiresAtEpoch,
           },
+        })
+        return
+      }
+
+      deactivateAutoWindow(runtime)
+
+      if (!config.requirePermit) {
+        runtime.calls.set(callKey, {
+          scoped: true,
+          action,
+          mode: config.mode,
+          permit: null,
+          mutable: true,
+          config,
+        })
+
+        await safeAudit(config, {
+          hook: "tool.execute.before",
+          decision: "allow",
+          reason_code: "ALLOW_MANUAL_STEP",
+          tool: action.tool,
+          command: action.command || "",
+          args_sha256: action.argsSha,
+          config_sha256: action.configSha || "",
+          call_id: input?.callID || "",
+          session_id: input?.sessionID || "",
+          mode: config.mode,
+          scoped: true,
+          require_permit: false,
         })
         return
       }
@@ -195,6 +231,7 @@ export const SteedGatePlugin = async ({ worktree }) => {
           permit_path: permitDecision.permitPath,
         },
         mutable: true,
+        config,
       })
 
       await safeAudit(config, {
@@ -209,6 +246,7 @@ export const SteedGatePlugin = async ({ worktree }) => {
         session_id: input?.sessionID || "",
         mode: config.mode,
         scoped: true,
+        require_permit: true,
         permit: {
           step_id: permitDecision.stepId,
           nonce: permitDecision.nonce,
@@ -225,6 +263,8 @@ export const SteedGatePlugin = async ({ worktree }) => {
       if (!call?.scoped) {
         return
       }
+
+      const config = call.config || loadGateConfig({ worktree })
 
       await safeAudit(config, {
         hook: "tool.execute.after",

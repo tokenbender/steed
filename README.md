@@ -19,34 +19,93 @@ The plugin decides whether an action is allowed. The runtime executes and writes
 bash scripts/install-opencode-steed-gate.sh
 ```
 
+This does not install or copy a separate Steed runtime binary; it only installs OpenCode plugin wiring and helper commands.
+
 2. Restart OpenCode so the plugin loader is picked up.
 
-3. Initialize scope in your project:
+3. Initialize Steed in your project:
 
 ```text
-/steed-gate-init
+/steed init
 ```
 
-4. Configure a profile in `infra_scripts/workflow/<profile>.cfg`:
-   - set `REPO_URL`
-   - set `OPS_REMOTE_REPO`
-   - set `OPS_LOCAL_REPO`
-   - configure target/pod values (`LIUM_*` or fallback host)
+4. Configure workflow values (no env required):
 
-5. Generate sweep CSV if needed:
+```text
+/steed cfg set REPO_URL https://github.com/org/repo.git
+/steed cfg set OPS_REMOTE_REPO /workspace/repo
+/steed cfg set OPS_LOCAL_REPO ~/work/repo
+```
+
+Or apply everything at once from a cfg file:
+
+```text
+/steed cfg apply steed.setup.cfg
+```
+
+Optional profile switch:
+
+```text
+/steed profile retrieval-sparse-fusion
+```
+
+5. Check readiness:
+
+```text
+/steed status
+```
+
+This validates missing required workflow keys and shows next steps.
+
+6. Generate sweep CSV if needed:
 
 ```bash
 ./steed sweep-csv-template
 ```
 
-6. In manual mode, generate a permit for each mutating step:
+7. Choose execution mode:
 
 ```text
-/steed-permit steed checkout
+/steed mode manual
 ```
 
-The default permit path is `.opencode/steed-gate/permit.json`.
-The command uses the installer-managed global secret file by default.
+or
+
+```text
+/steed mode auto
+```
+
+8. Run Steed commands directly (single-step or full autonomy):
+
+```text
+steed checkout
+steed flow --sweep start --fetch all --teardown delete
+```
+
+Optional hardened mode (signed permit per mutating step):
+
+```text
+/steed permit-mode on
+/steed permit steed checkout
+```
+
+Equivalent env toggle if needed:
+
+```bash
+export STEED_GATE_REQUIRE_PERMIT=1
+```
+
+`/steed` writes project-local gate config at `.opencode/steed-gate/config.json`.
+`/steed cfg apply` accepts `KEY=VALUE` lines and applies both gate keys (mode/permit/profile/etc.) and workflow keys.
+
+Reference workflow cfg file remains `infra_scripts/workflow/<profile>.cfg`:
+
+  - set `REPO_URL`
+  - set `OPS_REMOTE_REPO`
+  - set `OPS_LOCAL_REPO`
+  - configure target/pod values (`LIUM_*` or fallback host)
+
+Default permit path is `.opencode/steed-gate/permit.json`; `/steed permit ...` uses the installer-managed global secret file.
 
 ## Runtime Commands
 
@@ -79,7 +138,7 @@ If `TRAIN_COMMAND_TEMPLATE` is set, Steed executes it with `bash -lc` and expose
 - Plugin policy artifacts:
   - `${XDG_CONFIG_HOME:-~/.config}/opencode/steed-gate/audit/events.jsonl`
   - `${XDG_CONFIG_HOME:-~/.config}/opencode/steed-gate/deny/*`
-  - `${XDG_CONFIG_HOME:-~/.config}/opencode/steed-gate/permits/permits.used.jsonl`
+  - `${XDG_CONFIG_HOME:-~/.config}/opencode/steed-gate/permits/permits.used.jsonl` (hardened permit mode)
 
 ## Key Files
 
@@ -88,6 +147,6 @@ If `TRAIN_COMMAND_TEMPLATE` is set, Steed executes it with `bash -lc` and expose
 - `infra_scripts/workflow/` - profile configs
 - `packages/opencode-steed-gate/` - OpenCode policy plugin
 - `scripts/install-opencode-steed-gate.sh` - global plugin installer
-- `scripts/create-steed-permit.py` - signed permit generator
+- `scripts/create-steed-permit.py` - signed permit generator (optional hardened mode)
 - `docs/infrastructure-automation.md` - operational guide
 - `docs/STEED.md` - manifesto

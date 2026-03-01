@@ -9,7 +9,7 @@ Steed is split into two layers:
 1. **Control plane (OpenCode plugin)**
    - Package: `packages/opencode-steed-gate`
    - Enforces allow/deny before tool execution (`tool.execute.before`)
-   - Handles permits, deny reasons, and loop escalation
+   - Handles policy decisions, optional permits, deny reasons, and loop escalation
 
 2. **Data plane (runtime orchestrator)**
    - Entrypoint: `steed`
@@ -23,8 +23,10 @@ In normal operation, the plugin is authoritative for policy. The runtime execute
 ### 1) Manual mode (default)
 
 - `STEED_GATE_MODE=manual`
-- Steed-scoped mutating actions are denied unless a valid signed permit is present.
-- One permit is single-use (nonce replay is denied).
+- Steed-scoped mutating actions are allowed step-by-step by default.
+- No permit is required unless hardened mode is enabled.
+- Optional hardened mode: `STEED_GATE_REQUIRE_PERMIT=1`.
+- In hardened mode, permits are single-use (nonce replay is denied).
 
 ### 2) Autonomous mode (bounded)
 
@@ -39,6 +41,95 @@ In normal operation, the plugin is authoritative for policy. The runtime execute
 - You can still call `./steed ...` directly.
 - Recommended path remains plugin-mediated execution for deterministic gating and audit parity.
 
+## Mental Model
+
+### Shared control flow
+
+```text
+Human/Agent proposes action
+           |
+           v
+steed-gate plugin (tool.execute.before)
+  |- scope check (Steed-scoped v1)
+  |- mutating vs readonly classification
+  |- mode policy (manual step-wise or auto budget/ttl)
+  |- allow OR structured deny
+           |
+   +-------+-------+
+   |               |
+ ALLOW           DENY
+   |               |
+   v               v
+tool executes   no execution
+   |            deny payload + audit
+   v
+runtime backend writes artifacts
+```
+
+### Manual mode (default, step-wise)
+
+```text
+STEP_REQUESTED
+      |
+      | proposed action
+      v
+policy checks
+      |
+   +--+--+
+   |     |
+pass   fail
+   |     |
+   v     v
+ALLOW   DENY -> desired_action
+```
+
+### Manual mode (optional hardened permits)
+
+```text
+export STEED_GATE_REQUIRE_PERMIT=1
+
+WAITING_FOR_PERMIT
+      |
+      | /steed permit <exact steed command>
+      v
+PERMIT_READY
+      |
+      | mutating action
+      v
+gate verifies: tool, command, args hash, optional config hash,
+               expiry, signature, nonce replay
+      |
+   +--+--+
+   |     |
+ pass   fail
+   |     |
+   v     v
+ALLOW   DENY -> desired_action
+   |
+   v
+nonce consumed (single-use)
+```
+
+### Autonomous mode (bounded)
+
+```text
+WINDOW_OPEN (ttl + mutation budget)
+      |
+      | proposed mutating action
+      v
+checks: scope/core command/flow policy/ttl/budget
+      |
+   +--+--+
+   |     |
+ pass   fail
+   |     |
+   v     v
+ALLOW   DENY (expired/budget/policy)
+   |
+   v
+mutation_count += 1
+```
+
 ## First-Time Setup (Plugin-First)
 
 Install once from this repo:
@@ -51,17 +142,17 @@ The installer creates:
 
 - global plugin loader: `~/.config/opencode/plugins/steed-gate.js`
 - global secret file: `~/.config/opencode/steed-gate/secret` (auto-generated if missing)
-- global slash commands:
-  - `/steed-gate-init`
-  - `/steed-permit <exact steed command>`
+- global slash command: `/steed`
 
 Per project:
 
-1. Run `/steed-gate-init` (creates `.steed-gate-scope` and `.opencode/steed-gate/`).
-2. Configure your profile (`REPO_URL`, `OPS_REMOTE_REPO`, `OPS_LOCAL_REPO`, target vars).
-3. Generate sweep CSV via `./steed sweep-csv-template`.
-4. Generate permit per mutating step via `/steed-permit <exact command>` in manual mode.
-   - `/steed-permit` uses the global secret file created by installer unless you override secret env/file.
+1. Run `/steed init` (creates `.steed-gate-scope` and `.opencode/steed-gate/`).
+2. Configure workflow values with `/steed cfg set ...` (`REPO_URL`, `OPS_REMOTE_REPO`, `OPS_LOCAL_REPO`, target vars), or apply a full cfg file with `/steed cfg apply <file>`.
+3. Check readiness with `/steed status`.
+4. Generate sweep CSV via `./steed sweep-csv-template`.
+5. Optional (hardened mode): generate permit per mutating step via `/steed permit <exact command>`.
+   - Needed only when `STEED_GATE_REQUIRE_PERMIT=1`.
+   - `/steed permit` uses the global secret file created by installer unless you override secret env/file.
 
 ## Campaign Lifecycle
 
@@ -76,6 +167,24 @@ Steed runtime orchestrates:
 7. Teardown and final summary
 
 Use `flow` for end-to-end or individual commands for explicit control.
+
+Steed convenience behavior via `/steed` command:
+
+- `/steed pods` runs `lium ps` for immediate local pod visibility.
+- `/steed pod-up` auto-sets `LIUM_TARGET` to `LIUM_POD_NAME` when target is empty, then prints `lium ps`.
+
+### One-file configuration apply
+
+`/steed cfg apply <file>` reads `KEY=VALUE` lines and applies both:
+
+- gate keys (`mode`, `require_permit`, `profile`, `allow_flow_autorun`, `auto_ttl_secs`, `auto_max_mutations`, `scope_mode`)
+- workflow keys (written into `infra_scripts/workflow/<profile>.cfg`)
+
+Example:
+
+```text
+/steed cfg apply steed.setup.cfg
+```
 
 ## Training Execution Model
 
@@ -117,6 +226,7 @@ Under `${XDG_CONFIG_HOME:-~/.config}/opencode/steed-gate/`:
 - `deny/deny-events.jsonl`
 - `deny/deny-counts.json`
 - `permits/permits.used.jsonl`
+  - present/used when hardened permit mode is enabled
 
 ## Denials and Recovery
 
@@ -128,8 +238,21 @@ Policy denials are structured and machine-readable. Each deny includes:
 
 Repeated identical denials can escalate to `DENY_LOOP_TRIPPED`, requiring explicit human correction.
 
+```text
+DENY
+ |
+ +-> fingerprint(reason_code|tool|command|args_sha|config_sha)
+ |
+ +-> count[fingerprint] += 1
+       |
+       +-> count <= threshold -> retriable deny with desired_action
+       |
+       +-> count > threshold  -> DENY_LOOP_TRIPPED
+                                 desired_action=ESCALATE_TO_HUMAN
+```
+
 ## Notable Changes from Older Design
 
 - Legacy FSM command surface was removed.
 - Legacy split flow artifacts were consolidated into one canonical `flow.state.json`.
-- Policy enforcement is now plugin-first, with explicit permit and deny-loop contracts.
+- Policy enforcement is now plugin-first, with step-wise manual mode and optional hardened permits.

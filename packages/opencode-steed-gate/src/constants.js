@@ -17,4 +17,4 @@ export const STEED_BASH_PATTERN =
   /(^|\s)(\.\/)?steed(\s|$)|infra_scripts\/workflow\.sh|WORKFLOW_PROFILE=/
 
 export const STEED_PATH_PATTERN =
-  /(^|\/)(infra_scripts\/|artifacts\/pod_logs\/|steed$|docs\/STEED\.md$|docs\/infrastructure-automation\.md$)/
+  /(^|\/)(infra_scripts\/|artifacts\/pod_logs\/|\.opencode\/steed-gate\/|steed$|docs\/STEED\.md$|docs\/infrastructure-automation\.md$)/

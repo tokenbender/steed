@@ -66,6 +66,8 @@ const READONLY_TOOLS = new Set([
   "glob",
   "grep",
   "list",
+  "distill",
+  "prune",
   "skill",
   "webfetch",
   "websearch",
@@ -82,6 +84,73 @@ function tokenize(command) {
   return String(command || "")
     .match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g)
     ?.map((token) => stripQuotes(token)) || []
+}
+
+const STEED_PROJECT_CONTROL_COMMANDS = new Set([
+  "init",
+  "mode",
+  "permit-mode",
+  "profile",
+  "cfg",
+  "status",
+  "pods",
+  "permit",
+  "help",
+])
+
+function parseSteedProjectCommand(command) {
+  const tokens = tokenize(command)
+  if (tokens.length === 0) {
+    return null
+  }
+
+  const cleaned = [...tokens]
+  while (cleaned.length > 0 && /^[A-Za-z_][A-Za-z0-9_]*=/.test(cleaned[0])) {
+    cleaned.shift()
+  }
+
+  for (let i = 0; i < cleaned.length; i += 1) {
+    const token = cleaned[i]
+    const next = cleaned[i + 1] || ""
+    if (!/^(python|python3|uv|uvx)$/.test(token)) {
+      continue
+    }
+    if (!/scripts\/steed-project\.py$/.test(next)) {
+      continue
+    }
+
+    const first = cleaned[i + 2] || ""
+    const second = cleaned[i + 3] || ""
+    const rest = cleaned.slice(i + 3)
+
+    if (!first) {
+      return { control: "", runtimeSubcommand: "", args: [] }
+    }
+
+    if (first === "run") {
+      return {
+        control: "run",
+        runtimeSubcommand: second || "",
+        args: rest,
+      }
+    }
+
+    if (STEED_PROJECT_CONTROL_COMMANDS.has(first)) {
+      return {
+        control: first,
+        runtimeSubcommand: "",
+        args: cleaned.slice(i + 3),
+      }
+    }
+
+    return {
+      control: "run",
+      runtimeSubcommand: first,
+      args: cleaned.slice(i + 3),
+    }
+  }
+
+  return null
 }
 
 function parseSteedSubcommand(command) {
@@ -103,6 +172,11 @@ function parseSteedSubcommand(command) {
     if (token === "bash" && (next.endsWith("infra_scripts/workflow.sh") || next === "infra_scripts/workflow.sh")) {
       return next2 || ""
     }
+  }
+
+  const projectCommand = parseSteedProjectCommand(command)
+  if (projectCommand?.runtimeSubcommand) {
+    return projectCommand.runtimeSubcommand
   }
 
   return ""
@@ -220,7 +294,45 @@ function isSteedPath(filePath) {
   return STEED_PATH_PATTERN.test(String(filePath || ""))
 }
 
-function deriveMutation(tool, subcommand) {
+function isReadonlyGitCommand(command) {
+  const tokens = tokenize(command)
+  if (tokens.length === 0) {
+    return false
+  }
+
+  const cleaned = [...tokens]
+  while (cleaned.length > 0 && /^[A-Za-z_][A-Za-z0-9_]*=/.test(cleaned[0])) {
+    cleaned.shift()
+  }
+
+  if (cleaned[0] !== "git") {
+    return false
+  }
+
+  const subcommand = cleaned[1] || ""
+  const readonlySubcommands = new Set([
+    "show",
+    "status",
+    "diff",
+    "log",
+    "rev-parse",
+    "cat-file",
+    "ls-files",
+  ])
+
+  return readonlySubcommands.has(subcommand)
+}
+
+function isSteedControlCommand(command) {
+  const parsed = parseSteedProjectCommand(command)
+  return !!parsed && !parsed.runtimeSubcommand
+}
+
+function deriveMutation(tool, subcommand, command) {
+  if (tool === "bash" && isSteedControlCommand(command)) {
+    return false
+  }
+
   if (tool === "bash" && subcommand) {
     if (STEED_READONLY_COMMANDS.has(subcommand)) {
       return false
@@ -229,6 +341,10 @@ function deriveMutation(tool, subcommand) {
       return true
     }
     return true
+  }
+
+  if (tool === "bash" && isReadonlyGitCommand(command)) {
+    return false
   }
 
   if (READONLY_TOOLS.has(tool)) {
@@ -250,9 +366,9 @@ export async function extractAction({ input, output, worktree }) {
   const filePaths = extractPathCandidates(tool, args)
   const permitArgs = sanitizeArgsForPermit(tool, args)
   const argsSha = sha256Hex(stableStringify(permitArgs))
-  const isSteedCommand = tool === "bash" && isSteedBash(command)
+  const isSteedCommand = tool === "bash" && (isSteedBash(command) || !!subcommand)
   const isCoreCommand = !subcommand || STEED_CORE_COMMANDS.has(subcommand)
-  const isMutating = deriveMutation(tool, subcommand)
+  const isMutating = deriveMutation(tool, subcommand, command)
 
   const action = {
     tool,
@@ -282,11 +398,6 @@ export async function isSteedScopedAction({ action, config }) {
     return true
   }
 
-  const markerPath = path.resolve(config.worktree, config.scopeMarker)
-  if (!(await fileExists(markerPath))) {
-    return false
-  }
-
   if (action.isSteedCommand) {
     return true
   }
@@ -300,7 +411,11 @@ export async function isSteedScopedAction({ action, config }) {
   }
 
   const argsBlob = stableStringify(action.args)
-  return /steed|infra_scripts\/workflow\.sh|WORKFLOW_PROFILE/.test(argsBlob)
+  if (/steed|infra_scripts\/workflow\.sh|WORKFLOW_PROFILE/.test(argsBlob)) {
+    return true
+  }
+
+  return false
 }
 
 function permitDesiredAction(requiredFields) {
@@ -334,7 +449,7 @@ export function buildDenyPayload({ code, message, action, config, permitRequired
   } else if (code === "DENY_FLOW_AUTOMATION_BLOCKED") {
     desiredAction = {
       type: "RUN_EXPLICIT_PHASE_COMMAND",
-      description: "Flow autorun is blocked by policy; run explicit lifecycle command with permit.",
+      description: "Flow autorun is blocked by policy; run explicit lifecycle command instead.",
       example: "steed checkout",
     }
   } else if (code === "DENY_NON_CORE_COMMAND") {

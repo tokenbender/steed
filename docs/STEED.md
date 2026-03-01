@@ -63,7 +63,7 @@ It does not conduct research. It does not design experiments. It simply carries 
 ## What Steed Is Not
 
 - **Steed is not intelligent.** It does not optimize your learning rate or suggest architecture changes. That remains your domain.
-- **Steed is not implicitly autonomous.** The runtime executes explicit commands. Autonomous behavior is opt-in and bounded by policy (time/budget), while manual mode is deny-by-default for mutating actions.
+- **Steed is not implicitly autonomous.** The runtime executes explicit commands. Autonomous behavior is opt-in and bounded by policy (time/budget), while manual mode remains explicit and step-wise.
 - **Steed is not a black box.** Every step produces evidence: logs, JSON artifacts, deterministic checkpoints. The journey is auditable.
 - **Steed is not a substitute for understanding.** You should know what it's doing. But you shouldn't have to babysit it.
 
@@ -85,7 +85,7 @@ When things go wrong—and they will—Steed fails visibly and informatively. A 
 
 ### 4. Policy as Contract
 
-The contract is enforced at the gate. In manual mode, mutating actions require signed one-shot permits. In autonomous mode, execution is bounded by explicit TTL and mutation budgets. Violations are denied with deterministic reason codes, not fuzzy behavior.
+The contract is enforced at the gate. In manual mode, mutating actions are executed explicitly step-by-step (with optional hardened signed permits). In autonomous mode, execution is bounded by explicit TTL and mutation budgets. Violations are denied with deterministic reason codes, not fuzzy behavior.
 
 ### 5. The Single Command Journey
 
@@ -93,7 +93,7 @@ The contract is enforced at the gate. In manual mode, mutating actions require s
 steed flow --sweep start --fetch all --teardown delete
 ```
 
-One command can still run the full journey: provision, execute, retrieve, cleanup. In manual permit workflows, the same journey is executed step-by-step with explicit permits. Both paths keep the contract: you define the destination, Steed handles the terrain.
+One command can still run the full journey: provision, execute, retrieve, cleanup. In manual workflows, the same journey is executed step-by-step; optionally, hardened permit mode adds cryptographic approval per mutating step. Both paths keep the contract: you define the destination, Steed handles the terrain.
 
 ---
 

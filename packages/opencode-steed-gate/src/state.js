@@ -1,15 +1,35 @@
 import { nowEpoch } from "./utils.js"
 
-export function createRuntimeState(config) {
-  const now = nowEpoch()
+export function createRuntimeState() {
   return {
     calls: new Map(),
     auto: {
-      startedAtEpoch: now,
-      expiresAtEpoch: now + config.autoTtlSecs,
+      startedAtEpoch: 0,
+      expiresAtEpoch: 0,
       mutationCount: 0,
+      signature: "",
+      active: false,
     },
   }
+}
+
+export function ensureAutoWindow(runtime, config) {
+  const signature = `${config.autoTtlSecs}:${config.autoMaxMutations}`
+  const now = nowEpoch()
+
+  if (!runtime.auto.active || runtime.auto.signature !== signature) {
+    runtime.auto.startedAtEpoch = now
+    runtime.auto.expiresAtEpoch = now + config.autoTtlSecs
+    runtime.auto.mutationCount = 0
+    runtime.auto.signature = signature
+    runtime.auto.active = true
+  }
+
+  return runtime.auto
+}
+
+export function deactivateAutoWindow(runtime) {
+  runtime.auto.active = false
 }
 
 export function callKeyFor(input) {

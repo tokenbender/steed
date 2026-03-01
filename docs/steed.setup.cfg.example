@@ -1,0 +1,18 @@
+# Steed one-shot setup example
+
+# Gate controls (project-local .opencode/steed-gate/config.json)
+mode=manual
+require_permit=off
+profile=default
+allow_flow_autorun=off
+auto_ttl_secs=900
+auto_max_mutations=8
+
+# Workflow controls (infra_scripts/workflow/<profile>.cfg)
+REPO_URL=https://github.com/your-org/your-repo.git
+OPS_REMOTE_REPO=/workspace/your-repo
+OPS_LOCAL_REPO=~/work/your-repo
+
+# Set one target option
+LIUM_TARGET=
+OPS_DEFAULT_HOST=your-host

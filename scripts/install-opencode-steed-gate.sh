@@ -92,17 +92,18 @@ cat >"${steed_command_file}" <<EOF
 ---
 description: Steed project command (control or runtime)
 agent: build
-subtask: false
+subtask: true
 ---
 Run steed command:
 \`\$ARGUMENTS\`
 
-Shell output (includes stderr and explicit exit marker):
-!\`python3 ${control_script_json} \$ARGUMENTS 2>&1; echo "__STEED_EXIT_CODE__:\$?"\`
+Shell output (includes stderr, numeric exit marker, and artifact marker):
+!\`steed_log_dir="\${XDG_STATE_HOME:-\${HOME}/.local/state}/steed-gate"; mkdir -p "\$steed_log_dir"; steed_log_file="\$steed_log_dir/steed-\$(date +%Y%m%d-%H%M%S)-\$\$.log"; if steed_output="\$(python3 ${control_script_json} \$ARGUMENTS 2>&1)"; then steed_rc=0; else steed_rc=\$?; fi; printf "%s\n" "\$steed_output" > "\$steed_log_file"; printf "%s\n__STEED_EXIT_CODE__:%s\n__STEED_ARTIFACT__:%s\n" "\$steed_output" "\$steed_rc" "\$steed_log_file"\`
 
 Then respond with:
-- command status (success/failure from __STEED_EXIT_CODE__)
+- command status (success/failure from numeric __STEED_EXIT_CODE__)
 - key output lines (or explicit note if empty)
+- artifact path from __STEED_ARTIFACT__
 - if failure: exact fix command(s) and do not advance workflow phase
 - if success: what changed, current mode/profile status, next recommended steed command
 EOF

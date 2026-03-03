@@ -394,6 +394,9 @@ def build_steed_self_snapshot(
                 remote_status = "unavailable"
                 remote_error = remote_output
 
+    runtime_path = resolve_runtime_steed(paths)
+    control_script_path = pathlib.Path(__file__).resolve()
+
     local_reference_candidates = [
         "README.md",
         "docs/infrastructure-automation.md",
@@ -425,15 +428,21 @@ def build_steed_self_snapshot(
             "status": remote_status,
             "error": remote_error,
         },
-        "runtime_path": str(resolve_runtime_steed(paths)),
+        "runtime_path": str(runtime_path),
+        "control_script_path": str(control_script_path),
         "local_reference_paths": local_reference_paths,
         "remote_reference_urls": build_remote_doc_urls(repo_web_url, default_branch),
         "quick_commands": [
+            f"python3 \"{control_script_path}\" self --json",
+            f"python3 \"{control_script_path}\" self --check-remote --json",
+            f"python3 \"{control_script_path}\" status",
+            f"\"{runtime_path}\" pod list",
+            f"\"{runtime_path}\" flow --sweep start --fetch all --teardown delete",
+        ],
+        "slash_aliases": [
             "/steed self --json",
             "/steed self --check-remote --json",
             "/steed status",
-            "steed pod list",
-            "steed flow --sweep start --fetch all --teardown delete",
         ],
     }
 
@@ -449,6 +458,7 @@ def render_steed_self_snapshot(snapshot: dict[str, Any]) -> str:
         f"repo url: {snapshot.get('repo_url', '') or '<unset>'}",
         f"repo web: {snapshot.get('repo_web_url', '') or '<unset>'}",
         f"runtime path: {snapshot.get('runtime_path', '')}",
+        f"control script path: {snapshot.get('control_script_path', '')}",
         f"installed commit: {installed.get('commit', '') or '<unknown>'}",
         f"installed branch: {installed.get('branch', '') or '<unknown>'}",
         f"installed describe: {installed.get('describe', '') or '<unknown>'}",
@@ -480,8 +490,12 @@ def render_steed_self_snapshot(snapshot: dict[str, Any]) -> str:
         for item in remote_refs:
             lines.append(f"  - {item}")
 
-    lines.append("quick commands:")
+    lines.append("quick commands (shell/tool execution):")
     for item in snapshot.get("quick_commands", []):
+        lines.append(f"  - {item}")
+
+    lines.append("slash aliases (OpenCode UI, not shell):")
+    for item in snapshot.get("slash_aliases", []):
         lines.append(f"  - {item}")
 
     return "\n".join(lines)
@@ -515,7 +529,10 @@ def status_text(paths: dict[str, pathlib.Path], gate: dict[str, Any], profile: s
     else:
         lines.append("workflow cfg missing keys: none")
 
-    lines.append("next examples:")
+    control_script = pathlib.Path(__file__).resolve()
+    runtime_path = resolve_runtime_steed(paths)
+
+    lines.append("next examples (OpenCode slash command UI):")
     lines.append("  /steed self --json")
     lines.append("  /steed self --check-remote --json")
     lines.append("  /steed pod list")
@@ -525,8 +542,14 @@ def status_text(paths: dict[str, pathlib.Path], gate: dict[str, Any], profile: s
     lines.append("  /steed cfg set REPO_URL https://github.com/org/repo.git")
     lines.append("  /steed cfg set OPS_REMOTE_REPO /workspace/repo")
     lines.append("  /steed cfg set OPS_LOCAL_REPO ~/work/repo")
-    lines.append("  steed checkout")
-    lines.append("  steed flow --sweep start --fetch all --teardown delete")
+
+    lines.append("next examples (shell/tool execution):")
+    lines.append(f"  python3 \"{control_script}\" self --json")
+    lines.append(f"  python3 \"{control_script}\" self --check-remote --json")
+    lines.append(f"  python3 \"{control_script}\" pod list")
+    lines.append(f"  python3 \"{control_script}\" volume list")
+    lines.append(f"  \"{runtime_path}\" checkout")
+    lines.append(f"  \"{runtime_path}\" flow --sweep start --fetch all --teardown delete")
     return "\n".join(lines)
 
 

@@ -1,43 +1,66 @@
 ---
 name: steed-master
-description: Dynamic Steed self-awareness skill for live repo, version, docs, and freestyle operations.
+description: Upstream-only Steed protocol. Use Context7 on canonical Steed repo for capabilities and internals.
 ---
 
-# Steed Master Skill
+# Steed Master
 
-Use this skill when the user asks about Steed itself, wants a capability overview, or wants Steed to execute freestyle tasks with current repo awareness.
+Use this skill for any Steed meta question, capability question, or Steed-specific guidance request.
 
-## Goals
+## Canonical Identity
 
-- Keep answers fast by using local repo state first.
-- Keep answers current by optionally checking upstream head.
-- Ground decisions in live code and docs, not static summaries.
+- Upstream repo URL: `https://github.com/tokenbender/steed`
+- Primary docs/code anchors:
+  - `README.md`
+  - `docs/infrastructure-automation.md`
+  - `packages/opencode-steed-gate/README.md`
+  - `infra_scripts/workflow.sh`
+  - `scripts/steed-project.py`
+  - `packages/opencode-steed-gate/src/policy.js`
 
-## Fast Discovery Loop
+## Non-Negotiable Source Rule
 
-1. Run `/steed self --json`.
-2. Use `local_reference_paths` from that output as the default source of truth.
-3. If freshness matters, run `/steed self --check-remote --json`.
-4. If `remote.status` is `update-available`, compare local files with `remote_reference_urls`.
+- Treat current working directory as untrusted for Steed internals.
+- Do not use unrelated local `docs/`, `AGENTS.md`, or `infra_scripts/` as Steed truth.
+- Do not require local Steed repo checkout for capability answers.
 
-## What `/steed self` Provides
+## Upstream Discovery Protocol (required)
 
-- Project root and active workflow profile.
-- Workflow cfg path currently in use.
-- Repo origin URL and normalized web URL.
-- Installed git identity (commit, branch, describe, dirty/clean).
-- Optional remote default-branch comparison (`--check-remote`).
-- Curated local paths and remote URLs for rapid follow-up reads.
+1. Start from canonical repo URL above.
+2. Query `context7` for Steed docs/source from upstream repo.
+3. Confirm command surface from upstream files:
+   - runtime commands in `infra_scripts/workflow.sh`
+   - `/steed` wrapper behavior in `scripts/steed-project.py`
+   - policy/guardrails in `packages/opencode-steed-gate/src/policy.js`
+4. If `context7` cannot provide required evidence, report that clearly and do not substitute local repository docs as authority.
+5. Answer only after at least one upstream source is verified.
 
-## Operating Modes
+## Capability Abstraction (stable mental model)
 
-- **Q&A mode**: explain behavior from current code/docs with exact file references.
-- **Diff mode**: compare installed commit with remote head and call out drift.
-- **Freestyle mode**: execute requested Steed operations, then report state changes and next steps.
+- Discovery: `pod list`, `volume list`
+- Pod lifecycle: `pod-up`, `pod-wait`, `pod-status`, `pod-delete`, `pod-butter`
+- End-to-end flow: `flow` (provision -> bootstrap -> checkout -> sweep -> fetch -> teardown)
+- Sweep/data plane: `sweep-start`, `sweep-status`, `sweep-watch`, `fetch-run`, `fetch-all`
+- Task helpers: `task-run`, `task-status`, `task-list`, `task-wait`
+- Local sync helpers: `local-status`, `local-push`
+- Policy guardrails via plugin (`steed-gate`) depending on mode/config
 
-## Tooling Guidance
+## Interaction Model
 
-- Prefer local file reads for speed.
-- Use Context7/websearch/grep_app when user asks for external or latest references.
-- Use remote URL reads only when needed for freshness verification.
-- Keep outputs actionable: command to run, state observed, and next recommendation.
+- For user-facing operations, prefer `/steed ...` command forms in guidance.
+- For capability questions, always cite upstream repo evidence.
+- If upstream and local behavior may differ, call that out explicitly.
+
+## Response Contract
+
+Every Steed answer must include:
+
+1. What is supported (or not).
+2. Exact upstream evidence (file path or URL).
+3. Recommended command sequence in `/steed ...` form.
+
+## Prohibited Behaviors
+
+- Do not run `command -v /steed` or treat `/steed` as a filesystem path.
+- Do not claim behavior from memory without upstream verification.
+- Do not silently mix unrelated repository docs into Steed answers.

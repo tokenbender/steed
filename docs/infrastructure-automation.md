@@ -170,8 +170,16 @@ Use `flow` for end-to-end or individual commands for explicit control.
 
 Steed convenience behavior via `/steed` command:
 
-- `/steed pods` runs `lium ps` for immediate local pod visibility.
+- `/steed self --json` returns dynamic Steed project/repo/version/docs references.
+- `/steed self --check-remote --json` compares installed commit with remote default branch.
+- `/steed pods` maps to runtime `pod list` (active pods + rentable executors).
+- `/steed volumes` maps to runtime `volume list`.
 - `/steed pod-up` auto-sets `LIUM_TARGET` to `LIUM_POD_NAME` when target is empty, then prints `lium ps`.
+
+Steed runtime discovery commands:
+
+- `./steed pod list` (or `./steed pod-list`) lists active pods and rentable executors without requiring workflow config.
+- `./steed volume list` (or `./steed volume-list`) lists available volumes without requiring workflow config.
 
 ### One-file configuration apply
 

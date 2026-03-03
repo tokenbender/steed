@@ -1376,6 +1376,8 @@ cmd_help() {
                        options: --provision auto|skip, --sweep start|resume|skip,
                                 --wait true|false, --fetch none|all|run:<id>,
                                 --teardown keep|delete
+    pod-list           List active pods + rentable executors (alias: pod list)
+    volume-list        List available volumes (alias: volume list)
     pod-up             Provision a GPU pod
     pod-wait           Wait until pod is reachable
     pod-butter         Resilient pod create (retries on SSH failure)
@@ -1425,7 +1427,7 @@ EOF
 
 is_known_command() {
   case "$1" in
-    help|-h|--help|flow|pod-up|pod-wait|pod-delete|pod-butter|pod-status|config-sync|bootstrap|checkout|task-run|task-status|task-wait|task-list|checklist-status|checklist-reset|sweep-csv-template|workflow-sync|sweep-start|sweep-status|sweep-watch|fetch-all|fetch-run|local-status|local-push|_sweep_run_all|_sweep_status)
+    help|-h|--help|flow|pod-list|volume-list|pod-up|pod-wait|pod-delete|pod-butter|pod-status|config-sync|bootstrap|checkout|task-run|task-status|task-wait|task-list|checklist-status|checklist-reset|sweep-csv-template|workflow-sync|sweep-start|sweep-status|sweep-watch|fetch-all|fetch-run|local-status|local-push|_sweep_run_all|_sweep_status)
       return 0
       ;;
     *)
@@ -1970,6 +1972,49 @@ cmd_pod_wait() {
     log "waiting for pod SSH... (${elapsed}s elapsed)"
     sleep "$interval_secs"
   done
+}
+
+cmd_pod_list() {
+  command -v lium >/dev/null 2>&1 || die "lium CLI not found on PATH"
+
+  if [[ $# -gt 0 ]]; then
+    die "pod-list takes no arguments"
+  fi
+
+  printf '=== Active pods (lium ps) ===\n'
+  if ! lium ps; then
+    log "warning: failed to list active pods"
+  fi
+
+  printf '\n=== Rentable executors (lium ls) ===\n'
+  lium ls || die "unable to list rentable executors via lium ls"
+}
+
+cmd_volume_list() {
+  command -v lium >/dev/null 2>&1 || die "lium CLI not found on PATH"
+
+  if [[ $# -gt 0 ]]; then
+    die "volume-list takes no arguments"
+  fi
+
+  local output=""
+
+  if output="$(lium volume list 2>/dev/null)"; then
+    printf '%s\n' "$output"
+    return 0
+  fi
+
+  if output="$(lium volume ls 2>/dev/null)"; then
+    printf '%s\n' "$output"
+    return 0
+  fi
+
+  if output="$(lium volumes 2>/dev/null)"; then
+    printf '%s\n' "$output"
+    return 0
+  fi
+
+  die "unable to list volumes via lium CLI (tried: 'lium volume list', 'lium volume ls', 'lium volumes')"
 }
 
 cmd_pod_delete() {
@@ -3359,19 +3404,40 @@ main() {
   local cmd="$1"
   shift
 
+  case "$cmd" in
+    pod)
+      case "${1:-}" in
+        list|ls)
+          cmd="pod-list"
+          shift
+          ;;
+      esac
+      ;;
+    volume)
+      case "${1:-}" in
+        list|ls)
+          cmd="volume-list"
+          shift
+          ;;
+      esac
+      ;;
+  esac
+
   WF_ACTIVE_COMMAND="$cmd"
 
   if ! is_known_command "$cmd"; then
     die "unknown command: $cmd (run: ./steed --help)"
   fi
 
-  if [[ "$cmd" != "help" && "$cmd" != "-h" && "$cmd" != "--help" ]]; then
+  if [[ "$cmd" != "help" && "$cmd" != "-h" && "$cmd" != "--help" && "$cmd" != "pod-list" && "$cmd" != "volume-list" ]]; then
     constitution_preflight "$cmd"
   fi
 
   case "$cmd" in
     help|-h|--help) cmd_help ;;
     flow) cmd_flow "$@" ;;
+    pod-list) cmd_pod_list "$@" ;;
+    volume-list) cmd_volume_list "$@" ;;
     pod-up) cmd_pod_up "$@" ;;
     pod-wait) cmd_pod_wait "$@" ;;
     pod-delete) cmd_pod_delete "$@" ;;

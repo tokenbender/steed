@@ -19,6 +19,7 @@ import subprocess
 import sys
 import time
 from typing import Any
+from urllib.parse import urlparse
 
 
 GATE_DEFAULTS = {
@@ -273,6 +274,219 @@ def normalize_workflow_value(paths: dict[str, pathlib.Path], key: str, value: st
     return str(candidate)
 
 
+def run_capture(
+    command: list[str],
+    cwd: pathlib.Path | None = None,
+    timeout_secs: float = 2.5,
+) -> tuple[int, str]:
+    try:
+        completed = subprocess.run(
+            command,
+            cwd=str(cwd) if cwd else None,
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=timeout_secs,
+        )
+    except Exception:
+        return 1, ""
+
+    stdout = (completed.stdout or "").strip()
+    stderr = (completed.stderr or "").strip()
+    return completed.returncode, stdout or stderr
+
+
+def git_value(paths: dict[str, pathlib.Path], *args: str, timeout_secs: float = 2.5) -> str:
+    code, output = run_capture(["git", *args], cwd=paths["root"], timeout_secs=timeout_secs)
+    if code != 0 or not output:
+        return ""
+    return output.splitlines()[0].strip()
+
+
+def normalize_repo_web_url(repo_url: str) -> str:
+    text = str(repo_url or "").strip()
+    if not text:
+        return ""
+
+    if text.startswith("git@") and ":" in text:
+        host_path = text.split("@", 1)[1]
+        host, repo_path = host_path.split(":", 1)
+        normalized = f"https://{host}/{repo_path}"
+    elif text.startswith("ssh://"):
+        parsed = urlparse(text)
+        if not parsed.hostname:
+            return ""
+        normalized = f"https://{parsed.hostname}{parsed.path}"
+    else:
+        normalized = text
+
+    if normalized.endswith(".git"):
+        normalized = normalized[:-4]
+    return normalized.rstrip("/")
+
+
+def build_remote_doc_urls(repo_web_url: str, branch: str) -> list[str]:
+    if not repo_web_url or not branch:
+        return []
+
+    doc_paths = [
+        "README.md",
+        "docs/infrastructure-automation.md",
+        "docs/STEED.md",
+        "packages/opencode-steed-gate/README.md",
+    ]
+    return [f"{repo_web_url}/blob/{branch}/{item}" for item in doc_paths]
+
+
+def build_steed_self_snapshot(
+    paths: dict[str, pathlib.Path],
+    profile: str,
+    check_remote: bool,
+) -> dict[str, Any]:
+    cfg_path = workflow_config_path(paths, profile)
+    cfg_values = parse_cfg_assignments(cfg_path)
+
+    origin_url = git_value(paths, "config", "--get", "remote.origin.url")
+    repo_url = origin_url or str(cfg_values.get("REPO_URL") or "").strip()
+    repo_web_url = normalize_repo_web_url(repo_url)
+
+    is_git_repo = git_value(paths, "rev-parse", "--is-inside-work-tree") == "true"
+    installed_commit = git_value(paths, "rev-parse", "HEAD") if is_git_repo else ""
+    installed_branch = git_value(paths, "rev-parse", "--abbrev-ref", "HEAD") if is_git_repo else ""
+    installed_describe = git_value(paths, "describe", "--tags", "--dirty", "--always") if is_git_repo else ""
+
+    dirty = False
+    if is_git_repo:
+        status_code, status_output = run_capture(["git", "status", "--porcelain"], cwd=paths["root"], timeout_secs=2.5)
+        if status_code == 0:
+            dirty = bool(status_output.strip())
+
+    origin_default_ref = git_value(paths, "symbolic-ref", "--short", "refs/remotes/origin/HEAD")
+    default_branch = origin_default_ref[len("origin/") :] if origin_default_ref.startswith("origin/") else origin_default_ref
+    if not default_branch and installed_branch and installed_branch != "HEAD":
+        default_branch = installed_branch
+
+    remote_head_commit = ""
+    remote_status = "skipped"
+    remote_error = ""
+
+    if check_remote:
+        if not repo_url or not default_branch:
+            remote_status = "unavailable"
+            remote_error = "missing repo url or default branch"
+        else:
+            remote_target = "origin" if origin_url else repo_url
+            remote_code, remote_output = run_capture(
+                ["git", "ls-remote", "--heads", remote_target, default_branch],
+                cwd=paths["root"],
+                timeout_secs=6.0,
+            )
+            if remote_code == 0 and remote_output:
+                remote_head_commit = remote_output.split()[0]
+                if installed_commit and remote_head_commit == installed_commit:
+                    remote_status = "up-to-date"
+                elif installed_commit:
+                    remote_status = "update-available"
+                else:
+                    remote_status = "unknown"
+            else:
+                remote_status = "unavailable"
+                remote_error = remote_output
+
+    local_reference_candidates = [
+        "README.md",
+        "docs/infrastructure-automation.md",
+        "docs/STEED.md",
+        "packages/opencode-steed-gate/README.md",
+        "scripts/steed-project.py",
+        "infra_scripts/workflow.sh",
+        "packages/opencode-steed-gate/src/policy.js",
+    ]
+    local_reference_paths = [item for item in local_reference_candidates if (paths["root"] / item).exists()]
+
+    return {
+        "project_root": str(paths["root"]),
+        "profile": profile,
+        "workflow_config": str(cfg_path),
+        "repo_url": repo_url,
+        "repo_web_url": repo_web_url,
+        "installed": {
+            "is_git_repo": is_git_repo,
+            "commit": installed_commit,
+            "branch": installed_branch,
+            "describe": installed_describe,
+            "dirty": dirty,
+        },
+        "remote": {
+            "checked": check_remote,
+            "default_branch": default_branch,
+            "head_commit": remote_head_commit,
+            "status": remote_status,
+            "error": remote_error,
+        },
+        "runtime_path": str(resolve_runtime_steed(paths)),
+        "local_reference_paths": local_reference_paths,
+        "remote_reference_urls": build_remote_doc_urls(repo_web_url, default_branch),
+        "quick_commands": [
+            "/steed self --json",
+            "/steed self --check-remote --json",
+            "/steed status",
+            "steed pod list",
+            "steed flow --sweep start --fetch all --teardown delete",
+        ],
+    }
+
+
+def render_steed_self_snapshot(snapshot: dict[str, Any]) -> str:
+    installed = snapshot.get("installed", {})
+    remote = snapshot.get("remote", {})
+
+    lines = [
+        f"project: {snapshot.get('project_root', '')}",
+        f"profile: {snapshot.get('profile', '')}",
+        f"workflow cfg: {snapshot.get('workflow_config', '')}",
+        f"repo url: {snapshot.get('repo_url', '') or '<unset>'}",
+        f"repo web: {snapshot.get('repo_web_url', '') or '<unset>'}",
+        f"runtime path: {snapshot.get('runtime_path', '')}",
+        f"installed commit: {installed.get('commit', '') or '<unknown>'}",
+        f"installed branch: {installed.get('branch', '') or '<unknown>'}",
+        f"installed describe: {installed.get('describe', '') or '<unknown>'}",
+        f"working tree: {'dirty' if installed.get('dirty') else 'clean'}",
+    ]
+
+    if remote.get("checked"):
+        lines.append(
+            "remote compare: "
+            + str(remote.get("status") or "unknown")
+            + (
+                f" (branch: {remote.get('default_branch')}, head: {remote.get('head_commit')})"
+                if remote.get("head_commit")
+                else ""
+            )
+        )
+        if remote.get("error"):
+            lines.append(f"remote error: {remote.get('error')}")
+    else:
+        lines.append("remote compare: skipped (use --check-remote)")
+
+    lines.append("local reference paths:")
+    for item in snapshot.get("local_reference_paths", []):
+        lines.append(f"  - {item}")
+
+    remote_refs = snapshot.get("remote_reference_urls", [])
+    if remote_refs:
+        lines.append("remote reference urls:")
+        for item in remote_refs:
+            lines.append(f"  - {item}")
+
+    lines.append("quick commands:")
+    for item in snapshot.get("quick_commands", []):
+        lines.append(f"  - {item}")
+
+    return "\n".join(lines)
+
+
 def status_text(paths: dict[str, pathlib.Path], gate: dict[str, Any], profile: str) -> str:
     cfg_path = workflow_config_path(paths, profile)
     values = parse_cfg_assignments(cfg_path)
@@ -302,7 +516,10 @@ def status_text(paths: dict[str, pathlib.Path], gate: dict[str, Any], profile: s
         lines.append("workflow cfg missing keys: none")
 
     lines.append("next examples:")
-    lines.append("  /steed pods")
+    lines.append("  /steed self --json")
+    lines.append("  /steed self --check-remote --json")
+    lines.append("  /steed pod list")
+    lines.append("  /steed volume list")
     lines.append("  /steed mode auto")
     lines.append("  /steed cfg apply steed.setup.cfg")
     lines.append("  /steed cfg set REPO_URL https://github.com/org/repo.git")
@@ -446,9 +663,25 @@ def command_status(args: argparse.Namespace, paths: dict[str, pathlib.Path]) -> 
     return 0
 
 
+def command_self(args: argparse.Namespace, paths: dict[str, pathlib.Path]) -> int:
+    ensure_gate_scope(paths)
+    gate = load_gate_config(paths["gate_config"])
+    profile = args.profile or gate["profile"]
+    snapshot = build_steed_self_snapshot(paths, profile, args.check_remote)
+
+    if args.json:
+        print(json.dumps(snapshot, indent=2, sort_keys=True))
+    else:
+        print(render_steed_self_snapshot(snapshot))
+    return 0
+
+
 def command_pods(_args: argparse.Namespace, _paths: dict[str, pathlib.Path]) -> int:
-    completed = subprocess.run(["lium", "ps"], check=False)
-    return int(completed.returncode)
+    return command_run(argparse.Namespace(argv=["pod", "list"]), _paths)
+
+
+def command_volumes(_args: argparse.Namespace, _paths: dict[str, pathlib.Path]) -> int:
+    return command_run(argparse.Namespace(argv=["volume", "list"]), _paths)
 
 
 def command_permit(args: argparse.Namespace, paths: dict[str, pathlib.Path]) -> int:
@@ -578,7 +811,18 @@ def build_parser() -> argparse.ArgumentParser:
     status_cmd = sub.add_parser("status", help="Show gate/workflow status")
     status_cmd.add_argument("--profile", help="Workflow profile override")
 
-    sub.add_parser("pods", help="Show local lium pod list")
+    self_cmd = sub.add_parser("self", help="Show dynamic Steed metadata and references")
+    self_cmd.add_argument("--profile", help="Workflow profile override")
+    self_cmd.add_argument("--check-remote", action="store_true", help="Compare installed commit with remote default branch")
+    self_cmd.add_argument("--json", action="store_true", help="Emit machine-readable output")
+
+    about_cmd = sub.add_parser("about", help="Alias for 'self'")
+    about_cmd.add_argument("--profile", help="Workflow profile override")
+    about_cmd.add_argument("--check-remote", action="store_true", help="Compare installed commit with remote default branch")
+    about_cmd.add_argument("--json", action="store_true", help="Emit machine-readable output")
+
+    sub.add_parser("pods", help="Show active pods and rentable executors")
+    sub.add_parser("volumes", help="Show available volumes")
 
     permit_cmd = sub.add_parser("permit", help="Generate project permit (optional hardened mode)")
     permit_cmd.add_argument("command", nargs=argparse.REMAINDER)
@@ -599,7 +843,10 @@ def main() -> int:
         "profile",
         "cfg",
         "status",
+        "self",
+        "about",
         "pods",
+        "volumes",
         "permit",
         "run",
         "help",
@@ -628,8 +875,12 @@ def main() -> int:
         return command_profile(args, paths)
     if args.command == "status":
         return command_status(args, paths)
+    if args.command in {"self", "about"}:
+        return command_self(args, paths)
     if args.command == "pods":
         return command_pods(args, paths)
+    if args.command == "volumes":
+        return command_volumes(args, paths)
     if args.command == "permit":
         return command_permit(args, paths)
     if args.command == "run":

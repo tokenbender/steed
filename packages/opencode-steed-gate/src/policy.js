@@ -29,6 +29,8 @@ const STEED_READONLY_COMMANDS = new Set([
   "help",
   "-h",
   "--help",
+  "pod-list",
+  "volume-list",
   "pod-wait",
   "pod-status",
   "task-status",
@@ -47,6 +49,8 @@ const STEED_CORE_COMMANDS = new Set([
   "flow",
   "pod-up",
   "pod-wait",
+  "pod-list",
+  "volume-list",
   "pod-status",
   "pod-delete",
   "config-sync",
@@ -86,6 +90,25 @@ function tokenize(command) {
     ?.map((token) => stripQuotes(token)) || []
 }
 
+function normalizeSteedRuntimeSubcommand(primary, secondary = "") {
+  const first = String(primary || "")
+  const second = String(secondary || "")
+
+  if (!first) {
+    return ""
+  }
+
+  if (first === "pod" && (second === "list" || second === "ls")) {
+    return "pod-list"
+  }
+
+  if (first === "volume" && (second === "list" || second === "ls")) {
+    return "volume-list"
+  }
+
+  return first
+}
+
 const STEED_PROJECT_CONTROL_COMMANDS = new Set([
   "init",
   "mode",
@@ -93,7 +116,10 @@ const STEED_PROJECT_CONTROL_COMMANDS = new Set([
   "profile",
   "cfg",
   "status",
+  "self",
+  "about",
   "pods",
+  "volumes",
   "permit",
   "help",
 ])
@@ -121,6 +147,7 @@ function parseSteedProjectCommand(command) {
 
     const first = cleaned[i + 2] || ""
     const second = cleaned[i + 3] || ""
+    const third = cleaned[i + 4] || ""
     const rest = cleaned.slice(i + 3)
 
     if (!first) {
@@ -130,8 +157,24 @@ function parseSteedProjectCommand(command) {
     if (first === "run") {
       return {
         control: "run",
-        runtimeSubcommand: second || "",
+        runtimeSubcommand: normalizeSteedRuntimeSubcommand(second, third),
         args: rest,
+      }
+    }
+
+    if (first === "pods") {
+      return {
+        control: "run",
+        runtimeSubcommand: "pod-list",
+        args: cleaned.slice(i + 3),
+      }
+    }
+
+    if (first === "volumes") {
+      return {
+        control: "run",
+        runtimeSubcommand: "volume-list",
+        args: cleaned.slice(i + 3),
       }
     }
 
@@ -145,7 +188,7 @@ function parseSteedProjectCommand(command) {
 
     return {
       control: "run",
-      runtimeSubcommand: first,
+      runtimeSubcommand: normalizeSteedRuntimeSubcommand(first, second),
       args: cleaned.slice(i + 3),
     }
   }
@@ -160,17 +203,18 @@ function parseSteedSubcommand(command) {
     const token = tokens[i]
     const next = tokens[i + 1] || ""
     const next2 = tokens[i + 2] || ""
+    const next3 = tokens[i + 3] || ""
 
     if (token === "steed" || token === "./steed" || token.endsWith("/steed")) {
-      return next || ""
+      return normalizeSteedRuntimeSubcommand(next, next2)
     }
 
     if (token.endsWith("infra_scripts/workflow.sh") || token === "infra_scripts/workflow.sh") {
-      return next || ""
+      return normalizeSteedRuntimeSubcommand(next, next2)
     }
 
     if (token === "bash" && (next.endsWith("infra_scripts/workflow.sh") || next === "infra_scripts/workflow.sh")) {
-      return next2 || ""
+      return normalizeSteedRuntimeSubcommand(next2, next3)
     }
   }
 
@@ -459,6 +503,8 @@ export function buildDenyPayload({ code, message, action, config, permitRequired
       allowed_examples: [
         "pod-up",
         "pod-wait",
+        "pod-list",
+        "volume-list",
         "pod-status",
         "bootstrap",
         "checkout",

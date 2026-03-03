@@ -98,7 +98,9 @@ This installs:
 
 - plugin loader: `~/.config/opencode/plugins/steed-gate.js`
 - secret file (auto-generated if missing): `~/.config/opencode/steed-gate/secret`
-- slash command: `/steed` (init/mode/cfg/status/permit)
+- slash command: `/steed` (control commands + full workflow runtime passthrough)
+- MCP bundle defaults in OpenCode config: `websearch`, `context7`, `grep_app`
+- bundled skills in `~/.config/opencode/skills/`: `playwright`, `git-master`, `steed-master`
 
 Project setup can be done either key-by-key or in one shot:
 
@@ -107,5 +109,9 @@ Project setup can be done either key-by-key or in one shot:
 
 Operational helpers:
 
-- `/steed pods` for local `lium ps` visibility.
+- `/steed self --json` shows dynamic project/repo/version/docs references.
+- `/steed self --check-remote --json` compares installed commit to remote default branch.
+- `/steed pods` maps to runtime `pod list` (active pods + rentable executors).
+- `/steed volumes` maps to runtime `volume list`.
 - `/steed pod-up` auto-binds target (`LIUM_TARGET=LIUM_POD_NAME`) when target is empty.
+- `./steed pod list` (active + rentable) and `./steed volume list` for pre-provision discovery.

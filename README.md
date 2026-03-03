@@ -19,7 +19,7 @@ The plugin decides whether an action is allowed. The runtime executes and writes
 bash scripts/install-opencode-steed-gate.sh
 ```
 
-This does not install or copy a separate Steed runtime binary; it only installs OpenCode plugin wiring and helper commands.
+This does not install or copy a separate Steed runtime binary; it installs OpenCode plugin wiring, `/steed` command wiring, bundled MCP entries (`websearch`, `context7`, `grep_app`), and bundled skills (`playwright`, `git-master`, `steed-master`).
 
 2. Restart OpenCode so the plugin loader is picked up.
 
@@ -53,6 +53,8 @@ Optional profile switch:
 
 ```text
 /steed status
+/steed self --json
+/steed self --check-remote --json
 ```
 
 This validates missing required workflow keys and shows next steps.
@@ -111,6 +113,8 @@ Default permit path is `.opencode/steed-gate/permit.json`; `/steed permit ...` u
 
 ```bash
 ./steed --help
+./steed pod list
+./steed volume list
 ./steed flow --sweep start --fetch all --teardown delete
 ./steed sweep-status
 ./steed sweep-watch

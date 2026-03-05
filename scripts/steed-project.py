@@ -34,6 +34,17 @@ GATE_DEFAULTS = {
 
 REQUIRED_WORKFLOW_KEYS = ["REPO_URL", "OPS_REMOTE_REPO", "OPS_LOCAL_REPO"]
 TARGET_WORKFLOW_KEYS = ["LIUM_TARGET", "OPS_DEFAULT_HOST"]
+POD_UP_RELEVANT_KEYS = [
+    "LIUM_POD_NAME",
+    "LIUM_EXECUTOR_ID",
+    "LIUM_GPU",
+    "LIUM_COUNT",
+    "LIUM_COUNTRY",
+    "LIUM_PORTS",
+    "LIUM_TTL",
+    "LIUM_VOLUME",
+    "LIUM_YES",
+]
 
 
 def as_bool(value: Any, fallback: bool = False) -> bool:
@@ -339,6 +350,214 @@ def build_remote_doc_urls(repo_web_url: str, branch: str) -> list[str]:
     return [f"{repo_web_url}/blob/{branch}/{item}" for item in doc_paths]
 
 
+def build_pod_up_question(mode: str, missing: list[str], invalid: list[dict[str, str]]) -> dict[str, Any] | None:
+    if invalid:
+        first = invalid[0]
+        key = str(first.get("key") or "").strip()
+        reason = str(first.get("reason") or "").strip()
+        if key == "LIUM_EXECUTOR_ID" and reason == "numeric_only":
+            return {
+                "key": "LIUM_EXECUTOR_ID",
+                "header": "Executor ID",
+                "question": "Provide the full LIUM executor UUID/HUID from '/steed pod list' (numeric index values are not valid here).",
+                "options": [],
+                "allows_freeform": True,
+            }
+        if key == "LIUM_COUNT":
+            return {
+                "key": "LIUM_COUNT",
+                "header": "GPU Count",
+                "question": "Choose a positive GPU count for pod provisioning.",
+                "options": [
+                    {"label": "1 (Recommended)", "description": "Single GPU"},
+                    {"label": "2", "description": "Two GPUs"},
+                    {"label": "4", "description": "Four GPUs"},
+                    {"label": "8", "description": "Eight GPUs"},
+                ],
+                "allows_freeform": True,
+            }
+
+    if not missing:
+        return None
+
+    first_missing = missing[0]
+    if first_missing == "__PROVISION_MODE__":
+        return {
+            "key": "__PROVISION_MODE__",
+            "header": "Provision Mode",
+            "question": "How should pod-up choose hardware?",
+            "options": [
+                {"label": "Executor ID (Recommended)", "description": "Use a specific executor from '/steed pod list'"},
+                {"label": "GPU Filters", "description": "Choose by GPU model and count"},
+            ],
+            "allows_freeform": True,
+        }
+
+    if first_missing == "LIUM_POD_NAME":
+        return {
+            "key": "LIUM_POD_NAME",
+            "header": "Pod Name",
+            "question": "Provide a pod name (LIUM_POD_NAME) for the new rental.",
+            "options": [],
+            "allows_freeform": True,
+        }
+
+    if first_missing == "LIUM_EXECUTOR_ID":
+        return {
+            "key": "LIUM_EXECUTOR_ID",
+            "header": "Executor ID",
+            "question": "Provide the executor UUID/HUID to rent (from '/steed pod list').",
+            "options": [],
+            "allows_freeform": True,
+        }
+
+    if first_missing == "LIUM_GPU":
+        return {
+            "key": "LIUM_GPU",
+            "header": "GPU Type",
+            "question": "Choose a GPU model for pod-up.",
+            "options": [
+                {"label": "H100 (Recommended)", "description": "High-end NVIDIA H100"},
+                {"label": "H200", "description": "NVIDIA H200"},
+                {"label": "A100", "description": "NVIDIA A100"},
+                {"label": "RTX5090", "description": "GeForce RTX 5090"},
+                {"label": "RTX4090", "description": "GeForce RTX 4090"},
+            ],
+            "allows_freeform": True,
+        }
+
+    if first_missing == "LIUM_COUNT":
+        return {
+            "key": "LIUM_COUNT",
+            "header": "GPU Count",
+            "question": "Choose how many GPUs to request.",
+            "options": [
+                {"label": "1 (Recommended)", "description": "Single GPU"},
+                {"label": "2", "description": "Two GPUs"},
+                {"label": "4", "description": "Four GPUs"},
+                {"label": "8", "description": "Eight GPUs"},
+            ],
+            "allows_freeform": True,
+        }
+
+    return {
+        "key": first_missing,
+        "header": first_missing,
+        "question": f"Provide a value for {first_missing}.",
+        "options": [],
+        "allows_freeform": True,
+    }
+
+
+def build_pod_up_preflight(paths: dict[str, pathlib.Path], profile: str) -> dict[str, Any]:
+    cfg_path = workflow_config_path(paths, profile)
+    values = parse_cfg_assignments(cfg_path)
+    current = {key: str(values.get(key, "")).strip() for key in POD_UP_RELEVANT_KEYS}
+
+    executor_id = current.get("LIUM_EXECUTOR_ID", "")
+    gpu = current.get("LIUM_GPU", "")
+    count = current.get("LIUM_COUNT", "")
+
+    if executor_id:
+        mode = "executor-id"
+    elif gpu or count:
+        mode = "gpu-filter"
+    else:
+        mode = "undecided"
+
+    missing: list[str] = []
+    invalid: list[dict[str, str]] = []
+    warnings: list[str] = []
+    recommended_defaults: dict[str, str] = {}
+
+    if not current.get("LIUM_POD_NAME"):
+        missing.append("LIUM_POD_NAME")
+
+    if mode == "undecided":
+        missing.insert(0, "__PROVISION_MODE__")
+    elif mode == "executor-id":
+        if re.fullmatch(r"[0-9]+", executor_id):
+            invalid.append(
+                {
+                    "key": "LIUM_EXECUTOR_ID",
+                    "reason": "numeric_only",
+                    "message": "Use full executor UUID/HUID from '/steed pod list', not numeric index.",
+                }
+            )
+    elif mode == "gpu-filter":
+        if not gpu:
+            missing.append("LIUM_GPU")
+        if not count:
+            missing.append("LIUM_COUNT")
+        else:
+            try:
+                parsed_count = int(count)
+                if parsed_count <= 0:
+                    raise ValueError
+            except ValueError:
+                invalid.append(
+                    {
+                        "key": "LIUM_COUNT",
+                        "reason": "not_positive_int",
+                        "message": "LIUM_COUNT must be a positive integer.",
+                    }
+                )
+
+    yes_value = current.get("LIUM_YES", "")
+    if not yes_value:
+        recommended_defaults["LIUM_YES"] = "1"
+        warnings.append("LIUM_YES is unset; defaulting to 1 keeps noninteractive pod-up safe.")
+    elif yes_value.lower() in {"0", "false", "no", "off"}:
+        warnings.append("LIUM_YES is disabled; noninteractive pod-up can be blocked by workflow preflight.")
+
+    next_question = build_pod_up_question(mode, missing, invalid)
+    ready = not missing and not invalid
+
+    return {
+        "ready": ready,
+        "profile": profile,
+        "workflow_config": str(cfg_path),
+        "mode": mode,
+        "missing": missing,
+        "invalid": invalid,
+        "warnings": warnings,
+        "recommended_defaults": recommended_defaults,
+        "next_question": next_question,
+        "current": current,
+    }
+
+
+def render_pod_up_preflight(check: dict[str, Any]) -> str:
+    lines = [
+        f"pod-up preflight: {'ready' if check.get('ready') else 'needs-input'}",
+        f"profile: {check.get('profile')}",
+        f"workflow cfg: {check.get('workflow_config')}",
+        f"mode: {check.get('mode')}",
+    ]
+
+    missing = check.get("missing") or []
+    invalid = check.get("invalid") or []
+    warnings = check.get("warnings") or []
+
+    lines.append(f"missing: {', '.join(missing) if missing else 'none'}")
+    lines.append(f"invalid: {len(invalid)}")
+    for issue in invalid:
+        lines.append(f"  - {issue.get('key')}: {issue.get('message')}")
+
+    if warnings:
+        lines.append("warnings:")
+        for warning in warnings:
+            lines.append(f"  - {warning}")
+
+    next_question = check.get("next_question")
+    if next_question:
+        lines.append(
+            f"next question: {next_question.get('key')} -> {next_question.get('question')}"
+        )
+
+    return "\n".join(lines)
+
+
 def build_steed_self_snapshot(
     paths: dict[str, pathlib.Path],
     profile: str,
@@ -535,6 +754,7 @@ def status_text(paths: dict[str, pathlib.Path], gate: dict[str, Any], profile: s
     lines.append("next examples (OpenCode slash command UI):")
     lines.append("  /steed self --json")
     lines.append("  /steed self --check-remote --json")
+    lines.append("  /steed pod-up-check --json")
     lines.append("  /steed pod list")
     lines.append("  /steed volume list")
     lines.append("  /steed mode auto")
@@ -546,6 +766,7 @@ def status_text(paths: dict[str, pathlib.Path], gate: dict[str, Any], profile: s
     lines.append("next examples (shell/tool execution):")
     lines.append(f"  python3 \"{control_script}\" self --json")
     lines.append(f"  python3 \"{control_script}\" self --check-remote --json")
+    lines.append(f"  python3 \"{control_script}\" pod-up-check --json")
     lines.append(f"  python3 \"{control_script}\" pod list")
     lines.append(f"  python3 \"{control_script}\" volume list")
     lines.append(f"  \"{runtime_path}\" checkout")
@@ -699,6 +920,20 @@ def command_self(args: argparse.Namespace, paths: dict[str, pathlib.Path]) -> in
     return 0
 
 
+def command_pod_up_check(args: argparse.Namespace, paths: dict[str, pathlib.Path]) -> int:
+    ensure_gate_scope(paths)
+    gate = load_gate_config(paths["gate_config"])
+    profile = args.profile or gate["profile"]
+    check = build_pod_up_preflight(paths, profile)
+
+    if args.json:
+        print(json.dumps(check, indent=2, sort_keys=True))
+    else:
+        print(render_pod_up_preflight(check))
+
+    return 0 if check.get("ready") else 3
+
+
 def command_pods(_args: argparse.Namespace, _paths: dict[str, pathlib.Path]) -> int:
     return command_run(argparse.Namespace(argv=["pod", "list"]), _paths)
 
@@ -760,6 +995,8 @@ def resolve_runtime_steed(paths: dict[str, pathlib.Path]) -> pathlib.Path:
 
 def command_run(args: argparse.Namespace, paths: dict[str, pathlib.Path]) -> int:
     ensure_gate_scope(paths)
+    gate = load_gate_config(paths["gate_config"])
+    profile = gate.get("profile", "default")
 
     argv = list(args.argv or [])
     if argv and argv[0] == "steed":
@@ -774,12 +1011,34 @@ def command_run(args: argparse.Namespace, paths: dict[str, pathlib.Path]) -> int
         print(f"error: steed runtime not found at {steed_path}", file=sys.stderr)
         return 2
 
+    if argv and argv[0] == "pod-up":
+        preflight = build_pod_up_preflight(paths, profile)
+        if not preflight.get("ready"):
+            print("pod-up preflight requires additional configuration input")
+            print("__STEED_POD_UP_INTAKE_REQUIRED__:1")
+            print(
+                "__STEED_POD_UP_INTAKE_JSON__:"
+                + json.dumps(preflight, sort_keys=True, separators=(",", ":"))
+            )
+            next_question = preflight.get("next_question")
+            if next_question:
+                print(
+                    "__STEED_POD_UP_NEXT_QUESTION__:"
+                    + json.dumps(next_question, sort_keys=True, separators=(",", ":"))
+                )
+            return 3
+
+        if preflight.get("recommended_defaults", {}).get("LIUM_YES"):
+            cfg_path = workflow_config_path(paths, profile)
+            values = parse_cfg_assignments(cfg_path)
+            if not str(values.get("LIUM_YES", "")).strip():
+                set_cfg_key(cfg_path, "LIUM_YES", "1")
+                print(f"defaulted LIUM_YES=1 in {cfg_path}")
+
     cmd = [str(steed_path), *argv]
     completed = subprocess.run(cmd, check=False)
 
     if completed.returncode == 0 and argv and argv[0] == "pod-up":
-        gate = load_gate_config(paths["gate_config"])
-        profile = gate.get("profile", "default")
         cfg_path = workflow_config_path(paths, profile)
         values = parse_cfg_assignments(cfg_path)
         target = values.get("LIUM_TARGET", "").strip()
@@ -844,6 +1103,10 @@ def build_parser() -> argparse.ArgumentParser:
     about_cmd.add_argument("--check-remote", action="store_true", help="Compare installed commit with remote default branch")
     about_cmd.add_argument("--json", action="store_true", help="Emit machine-readable output")
 
+    pod_up_check_cmd = sub.add_parser("pod-up-check", help="Validate pod-up readiness and missing inputs")
+    pod_up_check_cmd.add_argument("--profile", help="Workflow profile override")
+    pod_up_check_cmd.add_argument("--json", action="store_true", help="Emit machine-readable output")
+
     sub.add_parser("pods", help="Show active pods and rentable executors")
     sub.add_parser("volumes", help="Show available volumes")
 
@@ -868,6 +1131,7 @@ def main() -> int:
         "status",
         "self",
         "about",
+        "pod-up-check",
         "pods",
         "volumes",
         "permit",
@@ -900,6 +1164,8 @@ def main() -> int:
         return command_status(args, paths)
     if args.command in {"self", "about"}:
         return command_self(args, paths)
+    if args.command == "pod-up-check":
+        return command_pod_up_check(args, paths)
     if args.command == "pods":
         return command_pods(args, paths)
     if args.command == "volumes":

@@ -118,6 +118,7 @@ const STEED_PROJECT_CONTROL_COMMANDS = new Set([
   "status",
   "self",
   "about",
+  "pod-up-check",
   "pods",
   "volumes",
   "permit",

@@ -111,6 +111,7 @@ Operational helpers:
 
 - `/steed self --json` shows dynamic project/repo/version/docs references.
 - `/steed self --check-remote --json` compares installed commit to remote default branch.
+- `/steed pod-up-check --json` shows interactive pod-up readiness (missing/invalid config + next question).
 - `/steed pods` maps to runtime `pod list` (active pods + rentable executors).
 - `/steed volumes` maps to runtime `volume list`.
 - `/steed pod-up` auto-binds target (`LIUM_TARGET=LIUM_POD_NAME`) when target is empty.

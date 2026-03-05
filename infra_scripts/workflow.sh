@@ -2094,8 +2094,10 @@ cmd_pod_up() {
   command -v lium >/dev/null 2>&1 || die "lium CLI not found on PATH"
 
   require_var LIUM_POD_NAME
-  require_var LIUM_GPU
-  require_var LIUM_COUNT
+  if [[ -z "${LIUM_EXECUTOR_ID:-}" ]]; then
+    require_var LIUM_GPU
+    require_var LIUM_COUNT
+  fi
 
   local max_up_timeout_secs=300
   local up_timeout_secs="${LIUM_UP_TIMEOUT_SECS:-300}"

@@ -352,39 +352,22 @@ def build_remote_doc_urls(repo_web_url: str, branch: str) -> list[str]:
     return [f"{repo_web_url}/blob/{branch}/{item}" for item in doc_paths]
 
 
-def build_pod_up_question(mode: str, missing: list[str], invalid: list[dict[str, str]]) -> dict[str, Any] | None:
-    if invalid:
-        first = invalid[0]
-        key = str(first.get("key") or "").strip()
-        reason = str(first.get("reason") or "").strip()
-        if key == "LIUM_EXECUTOR_ID" and reason == "numeric_only":
-            return {
-                "key": "LIUM_EXECUTOR_ID",
-                "header": "Executor ID",
-                "question": "Provide the full LIUM executor UUID/HUID from '/steed pod list' (numeric index values are not valid here).",
-                "options": [],
-                "allows_freeform": True,
-            }
-        if key == "LIUM_COUNT":
-            return {
-                "key": "LIUM_COUNT",
-                "header": "GPU Count",
-                "question": "Choose a positive GPU count for pod provisioning.",
-                "options": [
-                    {"label": "1 (Recommended)", "description": "Single GPU"},
-                    {"label": "2", "description": "Two GPUs"},
-                    {"label": "4", "description": "Four GPUs"},
-                    {"label": "8", "description": "Eight GPUs"},
-                ],
-                "allows_freeform": True,
-            }
-
-    if not missing:
-        return None
-
-    first_missing = missing[0]
-    if first_missing == "__PROVISION_MODE__":
-        return {
+def build_pod_up_question_for_key(
+    key: str,
+    *,
+    reason: str = "",
+    conditional: bool = False,
+) -> dict[str, Any]:
+    if key == "LIUM_EXECUTOR_ID" and reason == "numeric_only":
+        question = {
+            "key": "LIUM_EXECUTOR_ID",
+            "header": "Executor ID",
+            "question": "Provide the full LIUM executor UUID/HUID from '/steed pod list' (numeric index values are not valid here).",
+            "options": [],
+            "allows_freeform": True,
+        }
+    elif key == "__PROVISION_MODE__":
+        question = {
             "key": "__PROVISION_MODE__",
             "header": "Provision Mode",
             "question": "How should pod-up choose hardware?",
@@ -394,27 +377,24 @@ def build_pod_up_question(mode: str, missing: list[str], invalid: list[dict[str,
             ],
             "allows_freeform": True,
         }
-
-    if first_missing == "LIUM_POD_NAME":
-        return {
+    elif key == "LIUM_POD_NAME":
+        question = {
             "key": "LIUM_POD_NAME",
             "header": "Pod Name",
             "question": "Provide a pod name (LIUM_POD_NAME) for the new rental.",
             "options": [],
             "allows_freeform": True,
         }
-
-    if first_missing == "LIUM_EXECUTOR_ID":
-        return {
+    elif key == "LIUM_EXECUTOR_ID":
+        question = {
             "key": "LIUM_EXECUTOR_ID",
             "header": "Executor ID",
             "question": "Provide the executor UUID/HUID to rent (from '/steed pod list').",
             "options": [],
             "allows_freeform": True,
         }
-
-    if first_missing == "LIUM_GPU":
-        return {
+    elif key == "LIUM_GPU":
+        question = {
             "key": "LIUM_GPU",
             "header": "GPU Type",
             "question": "Choose a GPU model for pod-up.",
@@ -427,12 +407,12 @@ def build_pod_up_question(mode: str, missing: list[str], invalid: list[dict[str,
             ],
             "allows_freeform": True,
         }
-
-    if first_missing == "LIUM_COUNT":
-        return {
+    elif key == "LIUM_COUNT":
+        prompt = "Choose a positive GPU count for pod provisioning." if reason == "not_positive_int" else "Choose how many GPUs to request."
+        question = {
             "key": "LIUM_COUNT",
             "header": "GPU Count",
-            "question": "Choose how many GPUs to request.",
+            "question": prompt,
             "options": [
                 {"label": "1 (Recommended)", "description": "Single GPU"},
                 {"label": "2", "description": "Two GPUs"},
@@ -441,14 +421,65 @@ def build_pod_up_question(mode: str, missing: list[str], invalid: list[dict[str,
             ],
             "allows_freeform": True,
         }
+    else:
+        question = {
+            "key": key,
+            "header": key,
+            "question": f"Provide a value for {key}.",
+            "options": [],
+            "allows_freeform": True,
+        }
 
-    return {
-        "key": first_missing,
-        "header": first_missing,
-        "question": f"Provide a value for {first_missing}.",
-        "options": [],
-        "allows_freeform": True,
-    }
+    if conditional and key == "LIUM_EXECUTOR_ID":
+        question["options"] = list(question.get("options") or []) + [
+            {"label": "Not needed", "description": "Skip this if you are using GPU Filters instead"}
+        ]
+        question["required_when"] = {
+            "key": "__PROVISION_MODE__",
+            "answers": ["Executor ID (Recommended)", "Executor ID"],
+        }
+    elif conditional and key in {"LIUM_GPU", "LIUM_COUNT"}:
+        question["options"] = list(question.get("options") or []) + [
+            {"label": "Not needed", "description": "Skip this if you are using Executor ID instead"}
+        ]
+        question["required_when"] = {
+            "key": "__PROVISION_MODE__",
+            "answers": ["GPU Filters"],
+        }
+
+    return question
+
+
+def build_pod_up_questions(mode: str, missing: list[str], invalid: list[dict[str, str]]) -> list[dict[str, Any]]:
+    questions: list[dict[str, Any]] = []
+    seen: set[str] = set()
+
+    def add(key: str, *, reason: str = "", conditional: bool = False) -> None:
+        if key in seen:
+            return
+        questions.append(build_pod_up_question_for_key(key, reason=reason, conditional=conditional))
+        seen.add(key)
+
+    for issue in invalid:
+        add(str(issue.get("key") or "").strip(), reason=str(issue.get("reason") or "").strip())
+
+    for key in missing:
+        if key == "__PROVISION_MODE__":
+            add(key)
+            continue
+        add(key)
+
+    if mode == "undecided":
+        add("LIUM_EXECUTOR_ID", conditional=True)
+        add("LIUM_GPU", conditional=True)
+        add("LIUM_COUNT", conditional=True)
+
+    return questions
+
+
+def build_pod_up_question(mode: str, missing: list[str], invalid: list[dict[str, str]]) -> dict[str, Any] | None:
+    questions = build_pod_up_questions(mode, missing, invalid)
+    return questions[0] if questions else None
 
 
 def build_pod_up_preflight(paths: dict[str, pathlib.Path], profile: str) -> dict[str, Any]:
@@ -512,7 +543,8 @@ def build_pod_up_preflight(paths: dict[str, pathlib.Path], profile: str) -> dict
     elif yes_value.lower() in {"0", "false", "no", "off"}:
         warnings.append("LIUM_YES is disabled; noninteractive pod-up can be blocked by workflow preflight.")
 
-    next_question = build_pod_up_question(mode, missing, invalid)
+    questions = build_pod_up_questions(mode, missing, invalid)
+    next_question = questions[0] if questions else None
     ready = not missing and not invalid
 
     return {
@@ -524,6 +556,7 @@ def build_pod_up_preflight(paths: dict[str, pathlib.Path], profile: str) -> dict
         "invalid": invalid,
         "warnings": warnings,
         "recommended_defaults": recommended_defaults,
+        "questions": questions,
         "next_question": next_question,
         "current": current,
     }
@@ -551,11 +584,18 @@ def render_pod_up_preflight(check: dict[str, Any]) -> str:
         for warning in warnings:
             lines.append(f"  - {warning}")
 
-    next_question = check.get("next_question")
-    if next_question:
-        lines.append(
-            f"next question: {next_question.get('key')} -> {next_question.get('question')}"
-        )
+    questions = check.get("questions") or []
+    if questions:
+        lines.append(f"questions: {len(questions)}")
+        for question in questions:
+            suffix = ""
+            required_when = question.get("required_when") or {}
+            answers = required_when.get("answers") or []
+            if required_when.get("key") and answers:
+                suffix = f" [when {required_when.get('key')} is {', '.join(answers)}]"
+            lines.append(
+                f"  - {question.get('key')}: {question.get('question')}{suffix}"
+            )
 
     return "\n".join(lines)
 
@@ -1026,6 +1066,12 @@ def command_run(args: argparse.Namespace, paths: dict[str, pathlib.Path]) -> int
                 "__STEED_POD_UP_INTAKE_JSON__:"
                 + json.dumps(preflight, sort_keys=True, separators=(",", ":"))
             )
+            questions = preflight.get("questions") or []
+            if questions:
+                print(
+                    "__STEED_POD_UP_QUESTIONS__:"
+                    + json.dumps(questions, sort_keys=True, separators=(",", ":"))
+                )
             next_question = preflight.get("next_question")
             if next_question:
                 print(

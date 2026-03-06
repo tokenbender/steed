@@ -7,8 +7,9 @@ import {
   extractAction,
   isFlowAutorunBlocked,
   isNonCoreSteedCommand,
+  isPolicyApprovedAction,
   isDirectSteedRuntimeCommand,
-  isReadonlyAction,
+  isDirectRuntimeValidationAction,
   parseSteedWrapperCommand,
   isSteedProjectWrapperCommand,
   isSteedScopedAction,
@@ -132,6 +133,25 @@ function buildContinuationFromOutput(outputText, rootWrapper) {
     return null
   }
 
+  const questions =
+    parseMarkerJson(outputText, "__STEED_POD_UP_QUESTIONS__") ||
+    parseMarkerJson(outputText, "__STEED_POD_UP_INTAKE_JSON__")?.questions ||
+    []
+
+  const allowedKeys = [...new Set(
+    questions
+      .map((question) => String(question?.key || "").trim())
+      .filter((key) => key.startsWith("LIUM_")),
+  )]
+
+  if (allowedKeys.length > 0) {
+    return {
+      kind: "intake",
+      allowedKeys,
+      rootWrapper,
+    }
+  }
+
   const nextQuestion =
     parseMarkerJson(outputText, "__STEED_POD_UP_NEXT_QUESTION__") ||
     parseMarkerJson(outputText, "__STEED_POD_UP_INTAKE_JSON__")?.next_question ||
@@ -144,18 +164,16 @@ function buildContinuationFromOutput(outputText, rootWrapper) {
 
   if (key === "__PROVISION_MODE__") {
     return {
-      kind: "cfg-set",
+      kind: "intake",
       allowedKeys: ["LIUM_EXECUTOR_ID", "LIUM_GPU"],
-      questionKey: key,
       rootWrapper,
     }
   }
 
   if (key.startsWith("LIUM_")) {
     return {
-      kind: "cfg-set",
+      kind: "intake",
       allowedKeys: [key],
-      questionKey: key,
       rootWrapper,
     }
   }
@@ -168,12 +186,8 @@ function continuationMessage(continuation) {
     return "Steed continuation is not approved for this session"
   }
 
-  if (continuation.kind === "cfg-set") {
-    return `Only cfg set for ${continuation.allowedKeys.join(" or ")} is approved next`
-  }
-
-  if (continuation.kind === "rerun") {
-    return "Only rerunning the original /steed command is approved next"
+  if (continuation.kind === "intake") {
+    return `Only cfg set for ${continuation.allowedKeys.join(" or ")} or rerunning the original /steed command is approved next`
   }
 
   return "Steed continuation is not approved for this session"
@@ -219,71 +233,68 @@ export const SteedGatePlugin = async ({ worktree }) => {
         return
       }
 
-      if (action.tool === "bash" && isDirectSteedRuntimeCommand(action.command)) {
+      if (
+        action.tool === "bash" &&
+        isDirectSteedRuntimeCommand(action.command) &&
+        !isDirectRuntimeValidationAction(action)
+      ) {
         await denyAndThrow({
           config,
           input,
           action,
           code: "DENY_DIRECT_RUNTIME_BYPASS",
-          message: "direct Steed runtime bash is blocked; use the /steed wrapper instead",
+          message:
+            "direct Steed runtime bash is blocked for non-validation actions; use /steed or the steed-project.py backend wrapper instead",
         })
       }
 
       if (action.tool === "bash" && isSteedProjectWrapperCommand(action.command)) {
-        if (!session || session.command !== "steed") {
-          await denyAndThrow({
-            config,
-            input,
-            action,
-            code: "DENY_WRAPPER_BYPASS",
-            message: "Steed wrapper execution is only allowed through the /steed command",
-          })
-        }
-
-        const actionWorktree = resolveActionWorktree(action, config)
-        if (actionWorktree !== session.worktree) {
-          await denyAndThrow({
-            config,
-            input,
-            action,
-            code: "DENY_WORKTREE_DRIFT",
-            message: `Steed wrapper must run from session worktree ${session.worktree}`,
-          })
-        }
-
         const parsedWrapper = normalizeWrapperDescriptor(parseSteedWrapperCommand(action.command))
-        if (!session.rootWrapper && parsedWrapper) {
-          setSessionState(runtime, input, {
-            ...session,
-            rootWrapper: parsedWrapper,
-          })
-        }
 
-        if (session.continuation) {
-          let approved = false
-          if (session.continuation.kind === "cfg-set") {
-            const args = parsedWrapper?.args || []
-            approved =
-              parsedWrapper?.control === "cfg" &&
-              args[0] === "set" &&
-              session.continuation.allowedKeys.includes(String(args[1] || ""))
-          } else if (session.continuation.kind === "rerun") {
-            approved = sameWrapperDescriptor(parsedWrapper, session.continuation.rootWrapper)
-          }
-
-          if (!approved) {
+        if (session?.command === "steed") {
+          const actionWorktree = resolveActionWorktree(action, config)
+          if (actionWorktree !== session.worktree) {
             await denyAndThrow({
               config,
               input,
               action,
-              code: "DENY_CONTINUATION_NOT_APPROVED",
-              message: continuationMessage(session.continuation),
+              code: "DENY_WORKTREE_DRIFT",
+              message: `Steed wrapper must run from session worktree ${session.worktree}`,
             })
+          }
+
+          if (!session.rootWrapper && parsedWrapper) {
+            setSessionState(runtime, input, {
+              ...session,
+              rootWrapper: parsedWrapper,
+            })
+          }
+
+          if (session.continuation) {
+            const args = parsedWrapper?.args || []
+            const approvedCfgSet =
+              parsedWrapper?.control === "cfg" &&
+              args[0] === "set" &&
+              session.continuation.allowedKeys.includes(String(args[1] || ""))
+            const approvedRerun = sameWrapperDescriptor(
+              parsedWrapper,
+              session.continuation.rootWrapper || session.rootWrapper || parsedWrapper,
+            )
+
+            if (!approvedCfgSet && !approvedRerun) {
+              await denyAndThrow({
+                config,
+                input,
+                action,
+                code: "DENY_CONTINUATION_NOT_APPROVED",
+                message: continuationMessage(session.continuation),
+              })
+            }
           }
         }
       }
 
-      if (isReadonlyAction(action)) {
+      if (isPolicyApprovedAction(action)) {
         if (config.mode !== "auto") {
           deactivateAutoWindow(runtime)
         }
@@ -298,9 +309,10 @@ export const SteedGatePlugin = async ({ worktree }) => {
         await safeAudit(config, {
           hook: "tool.execute.before",
           decision: "allow",
-          reason_code: "ALLOW_READONLY",
+          reason_code: "ALLOW_POLICY_APPROVED",
           tool: action.tool,
           command: action.command || "",
+          policy_class: action.policyClass || "",
           args_sha256: action.argsSha,
           config_sha256: action.configSha || "",
           call_id: input?.callID || "",
@@ -370,6 +382,7 @@ export const SteedGatePlugin = async ({ worktree }) => {
           reason_code: "ALLOW_AUTO_BUDGET",
           tool: action.tool,
           command: action.command || "",
+          policy_class: action.policyClass || "",
           args_sha256: action.argsSha,
           config_sha256: action.configSha || "",
           call_id: input?.callID || "",
@@ -403,6 +416,7 @@ export const SteedGatePlugin = async ({ worktree }) => {
           reason_code: "ALLOW_MANUAL_STEP",
           tool: action.tool,
           command: action.command || "",
+          policy_class: action.policyClass || "",
           args_sha256: action.argsSha,
           config_sha256: action.configSha || "",
           call_id: input?.callID || "",
@@ -438,15 +452,16 @@ export const SteedGatePlugin = async ({ worktree }) => {
         config,
       })
 
-      await safeAudit(config, {
-        hook: "tool.execute.before",
-        decision: "allow",
-        reason_code: "ALLOW_SIGNED_PERMIT",
-        tool: action.tool,
-        command: action.command || "",
-        args_sha256: action.argsSha,
-        config_sha256: action.configSha || "",
-        call_id: input?.callID || "",
+        await safeAudit(config, {
+          hook: "tool.execute.before",
+          decision: "allow",
+          reason_code: "ALLOW_SIGNED_PERMIT",
+          tool: action.tool,
+          command: action.command || "",
+          policy_class: action.policyClass || "",
+          args_sha256: action.argsSha,
+          config_sha256: action.configSha || "",
+          call_id: input?.callID || "",
         session_id: input?.sessionID || "",
         mode: config.mode,
         scoped: true,
@@ -484,7 +499,7 @@ export const SteedGatePlugin = async ({ worktree }) => {
               rootWrapper: currentRootWrapper,
               continuation,
             })
-          } else if (session.continuation?.kind === "cfg-set") {
+          } else if (session.continuation?.kind === "intake") {
             const args = currentWrapper?.args || []
             const wasApprovedCfgSet =
               currentWrapper?.control === "cfg" &&
@@ -496,10 +511,12 @@ export const SteedGatePlugin = async ({ worktree }) => {
                 ...session,
                 rootWrapper: currentRootWrapper,
                 continuation: {
-                  kind: "rerun",
+                  ...session.continuation,
                   rootWrapper: currentRootWrapper,
                 },
               })
+            } else {
+              clearSessionState(runtime, input)
             }
           } else {
             clearSessionState(runtime, input)

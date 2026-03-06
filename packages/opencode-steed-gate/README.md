@@ -4,7 +4,7 @@ Deterministic policy gate plugin for OpenCode, scoped to Steed workflows.
 
 ## What It Enforces
 
-- Steed-scoped read-only actions are always allowed.
+- Steed-scoped policy-approved validation actions are always allowed, including direct runtime status/list/health checks.
 - In `manual` mode, Steed-scoped mutating actions are allowed step-by-step by default (no permit required).
 - Optional hardened mode (`STEED_GATE_REQUIRE_PERMIT=1`) requires valid signed single-use permits for mutating actions.
 - `flow` autorun can be blocked (`DENY_FLOW_AUTOMATION_BLOCKED`) unless explicitly enabled.
@@ -116,8 +116,10 @@ Operational helpers:
 
 - `/steed self --json` shows dynamic project/repo/version/docs references.
 - `/steed self --check-remote --json` compares installed commit to remote default branch.
-- `/steed pod-up-check --json` shows interactive pod-up readiness (missing/invalid config + next question).
+- `/steed pod-up-check --json` shows interactive pod-up readiness (missing/invalid config + batched intake questions).
 - `/steed pods` maps to runtime `pod list` (active pods + rentable executors).
 - `/steed volumes` maps to runtime `volume list`.
 - `/steed pod-up` auto-binds target (`LIUM_TARGET=LIUM_POD_NAME`) when target is empty.
 - `./steed pod list` (active + rentable) and `./steed volume list` for pre-provision discovery.
+- Direct raw runtime validation commands stay allowed; use `/steed ...` or `python3 scripts/steed-project.py ...` for workflow-changing steps.
+- In subagents or slash-less contexts, prefer `python3 scripts/steed-project.py ...` over raw `./steed ...`.

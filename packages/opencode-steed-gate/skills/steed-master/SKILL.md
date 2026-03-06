@@ -48,6 +48,7 @@ Use this skill for any Steed meta question, capability question, or Steed-specif
 ## Interaction Model
 
 - For user-facing operations, prefer `/steed ...` command forms in guidance.
+- For actual execution inside subagents or other slash-less contexts, prefer `python3 scripts/steed-project.py ...` over raw `./steed ...`.
 - For capability questions, always cite upstream repo evidence.
 - If upstream and local behavior may differ, call that out explicitly.
 
@@ -57,7 +58,7 @@ Every Steed answer must include:
 
 1. What is supported (or not).
 2. Exact upstream evidence (file path or URL).
-3. Recommended command sequence in `/steed ...` form.
+3. Recommended command sequence in `/steed ...` form for users, or backend-wrapper form for subagents when execution context matters.
 
 ## Prohibited Behaviors
 

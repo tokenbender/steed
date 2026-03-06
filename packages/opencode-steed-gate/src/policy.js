@@ -25,7 +25,7 @@ const STEED_MUTATING_COMMANDS = new Set([
   "local-push",
 ])
 
-const STEED_READONLY_COMMANDS = new Set([
+const STEED_RUNTIME_VALIDATION_COMMANDS = new Set([
   "help",
   "-h",
   "--help",
@@ -78,6 +78,12 @@ const READONLY_TOOLS = new Set([
   "codesearch",
   "lsp",
   "todoread",
+])
+
+const POLICY_APPROVED_CLASSES = new Set([
+  "runtime_validation",
+  "workspace_validation",
+  "session_control",
 ])
 
 function stripQuotes(value) {
@@ -393,34 +399,38 @@ function isSteedControlCommand(command) {
   return !!parsed && !parsed.runtimeSubcommand
 }
 
-function deriveMutation(tool, subcommand, command) {
+function derivePolicyClass(tool, subcommand, command) {
   if (tool === "bash" && isSteedControlCommand(command)) {
-    return false
+    return "session_control"
   }
 
   if (tool === "bash" && subcommand) {
-    if (STEED_READONLY_COMMANDS.has(subcommand)) {
-      return false
+    if (STEED_RUNTIME_VALIDATION_COMMANDS.has(subcommand)) {
+      return "runtime_validation"
     }
     if (STEED_MUTATING_COMMANDS.has(subcommand)) {
-      return true
+      return "workflow_change"
     }
-    return true
+    return "workflow_change"
   }
 
   if (tool === "bash" && isReadonlyGitCommand(command)) {
-    return false
+    return "workspace_validation"
   }
 
   if (READONLY_TOOLS.has(tool)) {
-    return false
+    return "workspace_validation"
   }
 
   if (MUTATING_TOOLS.has(tool)) {
-    return true
+    return "workspace_change"
   }
 
-  return true
+  return "workspace_change"
+}
+
+function deriveMutation(policyClass) {
+  return !POLICY_APPROVED_CLASSES.has(policyClass)
 }
 
 export async function extractAction({ input, output, worktree }) {
@@ -433,7 +443,8 @@ export async function extractAction({ input, output, worktree }) {
   const argsSha = sha256Hex(stableStringify(permitArgs))
   const isSteedCommand = tool === "bash" && (isSteedBash(command) || !!subcommand)
   const isCoreCommand = !subcommand || STEED_CORE_COMMANDS.has(subcommand)
-  const isMutating = deriveMutation(tool, subcommand, command)
+  const policyClass = derivePolicyClass(tool, subcommand, command)
+  const isMutating = deriveMutation(policyClass)
 
   const action = {
     tool,
@@ -445,6 +456,7 @@ export async function extractAction({ input, output, worktree }) {
     filePaths,
     isSteedCommand,
     isCoreCommand,
+    policyClass,
     isMutating,
     worktree,
     configSha: "",
@@ -537,15 +549,11 @@ export function buildDenyPayload({ code, message, action, config, permitRequired
     }
   } else if (code === "DENY_DIRECT_RUNTIME_BYPASS") {
     desiredAction = {
-      type: "USE_STEED_WRAPPER",
-      description: "Run Steed through the /steed wrapper only; direct runtime bash is blocked.",
+      type: "USE_STEED_WRAPPER_OR_BACKEND",
+      description:
+        "Run workflow-changing Steed actions through /steed or the steed-project.py backend wrapper; prefer the backend wrapper in subagents. Direct raw runtime validation/status/health checks remain allowed.",
       example: "/steed pod-up",
-    }
-  } else if (code === "DENY_WRAPPER_BYPASS") {
-    desiredAction = {
-      type: "USE_STEED_SLASH_COMMAND",
-      description: "Run Steed through the /steed slash command only; direct wrapper bash is blocked.",
-      example: "/steed pod-up",
+      backend_example: "python3 scripts/steed-project.py pod-up",
     }
   } else if (code === "DENY_WORKTREE_DRIFT") {
     desiredAction = {
@@ -586,6 +594,7 @@ export function buildDenyPayload({ code, message, action, config, permitRequired
     message,
     tool: action.tool,
     command: action.command || "",
+    policy_class: action.policyClass || "",
     args_sha256: action.argsSha,
     config_sha256: action.configSha || "",
     permit_path: config.permitFile || "",
@@ -595,8 +604,12 @@ export function buildDenyPayload({ code, message, action, config, permitRequired
   }
 }
 
-export function isReadonlyAction(action) {
-  return READONLY_TOOLS.has(action.tool) || !action.isMutating
+export function isPolicyApprovedAction(action) {
+  return POLICY_APPROVED_CLASSES.has(action.policyClass)
+}
+
+export function isDirectRuntimeValidationAction(action) {
+  return action.policyClass === "runtime_validation"
 }
 
 export function isFlowAutorunBlocked(action, config) {

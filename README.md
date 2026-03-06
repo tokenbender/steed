@@ -77,11 +77,20 @@ or
 /steed mode auto
 ```
 
-8. Run Steed commands directly (single-step or full autonomy):
+8. Run Steed commands:
+
+For user-facing interactive use:
 
 ```text
-steed checkout
-steed flow --sweep start --fetch all --teardown delete
+/steed checkout
+/steed flow --sweep start --fetch all --teardown delete
+```
+
+For subagents or other slash-less execution contexts, prefer the backend equivalent:
+
+```bash
+python3 scripts/steed-project.py checkout
+python3 scripts/steed-project.py flow --sweep start --fetch all --teardown delete
 ```
 
 Optional hardened mode (signed permit per mutating step):
@@ -99,6 +108,7 @@ export STEED_GATE_REQUIRE_PERMIT=1
 
 `/steed` writes project-local gate config at `.opencode/steed-gate/config.json`.
 `/steed cfg apply` accepts `KEY=VALUE` lines and applies both gate keys (mode/permit/profile/etc.) and workflow keys.
+For workflow-changing actions inside OpenCode, prefer `/steed ...` or `python3 scripts/steed-project.py ...`; raw `./steed ...` stays best for direct runtime validation/list/status commands.
 
 Reference workflow cfg file remains `infra_scripts/workflow/<profile>.cfg`:
 

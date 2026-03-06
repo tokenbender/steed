@@ -38,8 +38,9 @@ In normal operation, the plugin is authoritative for policy. The runtime execute
 
 ### 3) Direct runtime invocation
 
-- You can still call `./steed ...` directly.
-- Recommended path remains plugin-mediated execution for deterministic gating and audit parity.
+- You can still call policy-approved raw runtime validation commands directly for status/list/health checks.
+- Backend wrapper commands (`python3 scripts/steed-project.py ...`) are also allowed and are the preferred direct execution path for subagents or other slash-less contexts.
+- Recommended path remains `/steed ...` for user-facing execution because it keeps intent and continuation handling explicit.
 
 ## Mental Model
 
@@ -51,7 +52,7 @@ Human/Agent proposes action
            v
 steed-gate plugin (tool.execute.before)
   |- scope check (Steed-scoped v1)
-  |- mutating vs readonly classification
+  |- policy class classification (validation vs workflow-changing)
   |- mode policy (manual step-wise or auto budget/ttl)
   |- allow OR structured deny
            |
@@ -175,6 +176,12 @@ Steed convenience behavior via `/steed` command:
 - `/steed pods` maps to runtime `pod list` (active pods + rentable executors).
 - `/steed volumes` maps to runtime `volume list`.
 - `/steed pod-up` auto-sets `LIUM_TARGET` to `LIUM_POD_NAME` when target is empty, then prints `lium ps`.
+
+Subagent/backend equivalents:
+
+- `python3 scripts/steed-project.py <args>` is the backend equivalent of `/steed <args>`.
+- Prefer that backend form when a subagent cannot invoke slash commands directly.
+- Keep raw `./steed ...` usage mainly for runtime-native validation/list/status operations.
 
 Steed runtime discovery commands:
 

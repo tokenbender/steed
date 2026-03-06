@@ -159,10 +159,12 @@ Then respond with:
   - if the user says "continue", do not invent the next Steed command; only continue within the intake loop below or with an explicitly requested command
 - if output contains __STEED_POD_UP_INTAKE_REQUIRED__:1:
   - treat as needs-input (not a hard failure)
-  - parse __STEED_POD_UP_NEXT_QUESTION__ (fallback: __STEED_POD_UP_INTAKE_JSON__.next_question)
-  - ask exactly one targeted question using options + freeform
-  - apply answer with: python3 ${control_script_json} cfg set <KEY> <VALUE> when question key starts with LIUM_
-  - for __PROVISION_MODE__, ask one follow-up question in same session (LIUM_EXECUTOR_ID for executor path, or LIUM_GPU for gpu-filter path), then rerun the original command
+  - parse __STEED_POD_UP_QUESTIONS__ (fallback: __STEED_POD_UP_INTAKE_JSON__.questions, fallback: wrap __STEED_POD_UP_NEXT_QUESTION__ as a single-item list)
+  - ask all currently-needed targeted questions in one question tool call using the full batch
+  - conditional questions may include a 'required_when' field and a 'Not needed' option; respect that dependency and treat 'Not needed' as skip
+  - apply every answered LIUM_* value with: python3 ${control_script_json} cfg set <KEY> <VALUE>
+  - do not write __PROVISION_MODE__ into config; use it only to decide which conditional answers matter
+  - if the chosen mode still leaves required conditional inputs unresolved, ask one immediate follow-up batch only for the unresolved keys, then continue
   - rerun the original steed command and repeat until intake marker is gone
 - otherwise:
   - command status (success/failure from numeric __STEED_EXIT_CODE__)

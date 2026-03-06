@@ -3,6 +3,7 @@ import { nowEpoch } from "./utils.js"
 export function createRuntimeState() {
   return {
     calls: new Map(),
+    sessions: new Map(),
     auto: {
       startedAtEpoch: 0,
       expiresAtEpoch: 0,
@@ -40,4 +41,20 @@ export function callKeyFor(input) {
   const session = input?.sessionID || "session"
   const tool = input?.tool || "tool"
   return `fallback:${session}:${tool}`
+}
+
+export function sessionKeyFor(input) {
+  return String(input?.sessionID || "session")
+}
+
+export function getSessionState(runtime, input) {
+  return runtime.sessions.get(sessionKeyFor(input)) || null
+}
+
+export function setSessionState(runtime, input, value) {
+  runtime.sessions.set(sessionKeyFor(input), value)
+}
+
+export function clearSessionState(runtime, input) {
+  runtime.sessions.delete(sessionKeyFor(input))
 }

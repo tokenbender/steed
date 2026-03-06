@@ -197,6 +197,10 @@ function parseSteedProjectCommand(command) {
   return null
 }
 
+export function parseSteedWrapperCommand(command) {
+  return parseSteedProjectCommand(command)
+}
+
 function parseSteedSubcommand(command) {
   const tokens = tokenize(command)
 
@@ -537,11 +541,22 @@ export function buildDenyPayload({ code, message, action, config, permitRequired
       description: "Run Steed through the /steed wrapper only; direct runtime bash is blocked.",
       example: "/steed pod-up",
     }
+  } else if (code === "DENY_WRAPPER_BYPASS") {
+    desiredAction = {
+      type: "USE_STEED_SLASH_COMMAND",
+      description: "Run Steed through the /steed slash command only; direct wrapper bash is blocked.",
+      example: "/steed pod-up",
+    }
   } else if (code === "DENY_WORKTREE_DRIFT") {
     desiredAction = {
       type: "RETURN_TO_SESSION_WORKTREE",
       description: "Run the Steed wrapper from the original project worktree only.",
       example: "/steed status",
+    }
+  } else if (code === "DENY_CONTINUATION_NOT_APPROVED") {
+    desiredAction = {
+      type: "FOLLOW_APPROVED_CONTINUATION_ONLY",
+      description: "Only the exact next approved Steed continuation is allowed for this session.",
     }
   } else if (code === "DENY_AUTO_WINDOW_EXPIRED") {
     desiredAction = {

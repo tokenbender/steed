@@ -162,7 +162,7 @@ Then respond with:
   - parse __STEED_POD_UP_NEXT_QUESTION__ (fallback: __STEED_POD_UP_INTAKE_JSON__.next_question)
   - ask exactly one targeted question using options + freeform
   - apply answer with: python3 ${control_script_json} cfg set <KEY> <VALUE> when question key starts with LIUM_
-  - for __PROVISION_MODE__, ask one follow-up question in same session (LIUM_EXECUTOR_ID for executor path, or LIUM_GPU then LIUM_COUNT for gpu-filter path)
+  - for __PROVISION_MODE__, ask one follow-up question in same session (LIUM_EXECUTOR_ID for executor path, or LIUM_GPU for gpu-filter path), then rerun the original command
   - rerun the original steed command and repeat until intake marker is gone
 - otherwise:
   - command status (success/failure from numeric __STEED_EXIT_CODE__)

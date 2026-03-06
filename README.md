@@ -19,9 +19,9 @@ The plugin decides whether an action is allowed. The runtime executes and writes
 bash scripts/install-opencode-steed-gate.sh
 ```
 
-This does not install or copy a separate Steed runtime binary; it installs OpenCode plugin wiring, `/steed` command wiring, bundled MCP entries (`websearch`, `context7`, `grep_app`), and bundled skills (`playwright`, `git-master`, `steed-master`).
+This installs a self-contained Steed bundle into `~/.config/opencode/steed-gate/` with plugin wiring, `/steed` command wiring, bundled runtime/scripts, MCP entries (`websearch`, `context7`, `grep_app`), and bundled skills (`playwright`, `git-master`, `steed-master`).
 
-2. Restart OpenCode so the plugin loader is picked up.
+2. Restart OpenCode so the plugin loader and bundled plugin copy are picked up.
 
 3. Initialize Steed in your project:
 

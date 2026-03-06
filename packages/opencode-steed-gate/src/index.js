@@ -7,8 +7,11 @@ import {
   extractAction,
   isFlowAutorunBlocked,
   isNonCoreSteedCommand,
+  isDirectSteedRuntimeCommand,
   isReadonlyAction,
+  isSteedProjectWrapperCommand,
   isSteedScopedAction,
+  resolveActionWorktree,
 } from "./policy.js"
 import { callKeyFor, createRuntimeState, deactivateAutoWindow, ensureAutoWindow } from "./state.js"
 import { nowEpoch } from "./utils.js"
@@ -77,6 +80,29 @@ export const SteedGatePlugin = async ({ worktree }) => {
           config,
         })
         return
+      }
+
+      if (action.tool === "bash" && isDirectSteedRuntimeCommand(action.command)) {
+        await denyAndThrow({
+          config,
+          input,
+          action,
+          code: "DENY_DIRECT_RUNTIME_BYPASS",
+          message: "direct Steed runtime bash is blocked; use the /steed wrapper instead",
+        })
+      }
+
+      if (action.tool === "bash" && isSteedProjectWrapperCommand(action.command)) {
+        const actionWorktree = resolveActionWorktree(action, config)
+        if (actionWorktree !== config.worktree) {
+          await denyAndThrow({
+            config,
+            input,
+            action,
+            code: "DENY_WORKTREE_DRIFT",
+            message: `Steed wrapper must run from session worktree ${config.worktree}`,
+          })
+        }
       }
 
       if (isReadonlyAction(action)) {

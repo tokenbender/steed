@@ -4,9 +4,15 @@ set -euo pipefail
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "${script_dir}/.." && pwd)"
 
-plugin_entry="${repo_root}/packages/opencode-steed-gate/index.js"
+plugin_source_dir="${repo_root}/packages/opencode-steed-gate"
+plugin_entry="${plugin_source_dir}/index.js"
+plugin_package_json="${plugin_source_dir}/package.json"
+plugin_src_dir="${plugin_source_dir}/src"
 permit_script="${repo_root}/scripts/create-steed-permit.py"
 control_script="${repo_root}/scripts/steed-project.py"
+runtime_entry="${repo_root}/steed"
+workflow_script="${repo_root}/infra_scripts/workflow.sh"
+workflow_assets_dir="${repo_root}/infra_scripts/workflow"
 playwright_skill_source="${repo_root}/packages/opencode-steed-gate/skills/playwright/SKILL.md"
 git_master_skill_source="${repo_root}/packages/opencode-steed-gate/skills/git-master/SKILL.md"
 steed_master_skill_source="${repo_root}/packages/opencode-steed-gate/skills/steed-master/SKILL.md"
@@ -15,12 +21,32 @@ if [[ ! -f "${plugin_entry}" ]]; then
   echo "plugin entry not found: ${plugin_entry}" >&2
   exit 1
 fi
+if [[ ! -f "${plugin_package_json}" ]]; then
+  echo "plugin package metadata not found: ${plugin_package_json}" >&2
+  exit 1
+fi
+if [[ ! -d "${plugin_src_dir}" ]]; then
+  echo "plugin source directory not found: ${plugin_src_dir}" >&2
+  exit 1
+fi
 if [[ ! -f "${permit_script}" ]]; then
   echo "permit generator not found: ${permit_script}" >&2
   exit 1
 fi
 if [[ ! -f "${control_script}" ]]; then
   echo "steed control script not found: ${control_script}" >&2
+  exit 1
+fi
+if [[ ! -f "${runtime_entry}" ]]; then
+  echo "steed runtime entry not found: ${runtime_entry}" >&2
+  exit 1
+fi
+if [[ ! -f "${workflow_script}" ]]; then
+  echo "workflow script not found: ${workflow_script}" >&2
+  exit 1
+fi
+if [[ ! -d "${workflow_assets_dir}" ]]; then
+  echo "workflow assets directory not found: ${workflow_assets_dir}" >&2
   exit 1
 fi
 if [[ ! -f "${playwright_skill_source}" ]]; then
@@ -42,14 +68,26 @@ gate_home="${opencode_home}/steed-gate"
 plugins_dir="${opencode_home}/plugins"
 commands_dir="${opencode_home}/commands"
 skills_dir="${opencode_home}/skills"
-mkdir -p "${plugins_dir}" "${commands_dir}" "${gate_home}" "${skills_dir}"
+plugin_bundle_root="${gate_home}/plugin"
+plugin_bundle_dir="${plugin_bundle_root}/opencode-steed-gate"
+runtime_bundle_dir="${gate_home}/runtime"
+runtime_bundle_scripts_dir="${gate_home}/scripts"
+runtime_bundle_infra_dir="${runtime_bundle_dir}/infra_scripts"
+mkdir -p "${plugins_dir}" "${commands_dir}" "${gate_home}" "${skills_dir}" "${plugin_bundle_root}" "${runtime_bundle_dir}" "${runtime_bundle_scripts_dir}" "${runtime_bundle_infra_dir}"
 
 loader_file="${plugins_dir}/steed-gate.js"
 secret_file="${gate_home}/secret"
 steed_command_file="${commands_dir}/steed.md"
 mcp_bundle_file="${gate_home}/mcp.bundle.json"
 
-plugin_entry_json="$(python3 - <<'PY' "${plugin_entry}"
+plugin_bundle_entry="${plugin_bundle_dir}/index.js"
+bundled_control_script="${runtime_bundle_scripts_dir}/steed-project.py"
+bundled_permit_script="${runtime_bundle_scripts_dir}/create-steed-permit.py"
+bundled_runtime_entry="${runtime_bundle_dir}/steed"
+bundled_workflow_script="${runtime_bundle_infra_dir}/workflow.sh"
+bundled_workflow_assets_dir="${runtime_bundle_infra_dir}/workflow"
+
+plugin_entry_json="$(python3 - <<'PY' "${plugin_bundle_entry}"
 import json
 import sys
 
@@ -57,7 +95,7 @@ print(json.dumps(sys.argv[1]))
 PY
 )"
 
-control_script_json="$(python3 - <<'PY' "${control_script}"
+control_script_json="$(python3 - <<'PY' "${bundled_control_script}"
 import json
 import sys
 
@@ -81,6 +119,20 @@ else
   echo "Using existing steed-gate secret at: ${secret_file}"
 fi
 
+rm -rf "${plugin_bundle_dir}"
+mkdir -p "${plugin_bundle_dir}"
+cp "${plugin_entry}" "${plugin_bundle_dir}/index.js"
+cp "${plugin_package_json}" "${plugin_bundle_dir}/package.json"
+cp -R "${plugin_src_dir}" "${plugin_bundle_dir}/src"
+
+cp "${control_script}" "${bundled_control_script}"
+cp "${permit_script}" "${bundled_permit_script}"
+cp "${runtime_entry}" "${bundled_runtime_entry}"
+cp "${workflow_script}" "${bundled_workflow_script}"
+rm -rf "${bundled_workflow_assets_dir}"
+cp -R "${workflow_assets_dir}" "${bundled_workflow_assets_dir}"
+chmod +x "${bundled_runtime_entry}" "${bundled_workflow_script}"
+
 cat >"${loader_file}" <<EOF
 import SteedGatePlugin from ${plugin_entry_json}
 
@@ -94,19 +146,23 @@ description: Steed project command (control or runtime)
 agent: build
 subtask: true
 ---
-Run steed command:
-\`\$ARGUMENTS\`
+Requested Steed arguments: \$ARGUMENTS
 
 Shell output (includes stderr, numeric exit marker, and artifact marker):
 !\`steed_log_dir="\${XDG_STATE_HOME:-\${HOME}/.local/state}/steed-gate"; mkdir -p "\$steed_log_dir"; steed_log_file="\$steed_log_dir/steed-\$(date +%Y%m%d-%H%M%S)-\$\$.log"; if steed_output="\$(python3 ${control_script_json} \$ARGUMENTS 2>&1)"; then steed_rc=0; else steed_rc=\$?; fi; printf "%s\n" "\$steed_output" > "\$steed_log_file"; printf "%s\n__STEED_EXIT_CODE__:%s\n__STEED_ARTIFACT__:%s\n" "\$steed_output" "\$steed_rc" "\$steed_log_file"\`
 
 Then respond with:
+- critical execution rule:
+  - the slash command has already executed the requested Steed action in the correct project context
+  - do not run additional shell commands like steed ..., ./steed ..., /steed ..., or /Users/.../steed/... to retry or continue it
+  - do not switch into the Steed source repo or copy workflow config between repos unless the user explicitly asks
+  - if the user says "continue", do not invent the next Steed command; only continue within the intake loop below or with an explicitly requested command
 - if output contains __STEED_POD_UP_INTAKE_REQUIRED__:1:
-  - treat as `needs-input` (not a hard failure)
+  - treat as needs-input (not a hard failure)
   - parse __STEED_POD_UP_NEXT_QUESTION__ (fallback: __STEED_POD_UP_INTAKE_JSON__.next_question)
   - ask exactly one targeted question using options + freeform
-  - apply answer with: `python3 ${control_script_json} cfg set <KEY> <VALUE>` when question key starts with `LIUM_`
-  - for `__PROVISION_MODE__`, ask one follow-up question in same session (`LIUM_EXECUTOR_ID` for executor path, or `LIUM_GPU` then `LIUM_COUNT` for gpu-filter path)
+  - apply answer with: python3 ${control_script_json} cfg set <KEY> <VALUE> when question key starts with LIUM_
+  - for __PROVISION_MODE__, ask one follow-up question in same session (LIUM_EXECUTOR_ID for executor path, or LIUM_GPU then LIUM_COUNT for gpu-filter path)
   - rerun the original steed command and repeat until intake marker is gone
 - otherwise:
   - command status (success/failure from numeric __STEED_EXIT_CODE__)
@@ -293,9 +349,11 @@ PY
 rm -f "${commands_dir}/steed-gate-init.md" "${commands_dir}/steed-permit.md"
 
 echo "Installed steed-gate loader at: ${loader_file}"
+echo "Installed steed-gate plugin bundle at: ${plugin_bundle_dir}"
+echo "Installed steed runtime bundle at: ${runtime_bundle_dir}"
+echo "Installed steed helper scripts at: ${runtime_bundle_scripts_dir}"
 echo "Installed command: /steed"
 echo "Installed MCP bundle defaults: websearch, context7, grep_app"
 echo "Installed bundled skills: playwright, git-master, steed-master"
 echo "Secret file: ${secret_file}"
-echo "Plugin source: ${plugin_entry}"
 echo "Restart OpenCode to load changes."

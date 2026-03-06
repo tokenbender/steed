@@ -97,10 +97,15 @@ bash scripts/install-opencode-steed-gate.sh
 This installs:
 
 - plugin loader: `~/.config/opencode/plugins/steed-gate.js`
+- plugin bundle copy: `~/.config/opencode/steed-gate/plugin/opencode-steed-gate/`
+- bundled steed runtime: `~/.config/opencode/steed-gate/runtime/`
+- bundled steed helper scripts: `~/.config/opencode/steed-gate/scripts/`
 - secret file (auto-generated if missing): `~/.config/opencode/steed-gate/secret`
 - slash command: `/steed` (control commands + full workflow runtime passthrough)
 - MCP bundle defaults in OpenCode config: `websearch`, `context7`, `grep_app`
 - bundled skills in `~/.config/opencode/skills/`: `playwright`, `git-master`, `steed-master`
+
+The install is self-contained under `~/.config/opencode/steed-gate/`; it does not require the Steed source repo to remain present after installation.
 
 Project setup can be done either key-by-key or in one shot:
 

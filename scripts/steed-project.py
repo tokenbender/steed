@@ -84,6 +84,8 @@ def as_nonnegative_int(value: Any, fallback: int) -> int:
 
 def resolve_paths(root: pathlib.Path) -> dict[str, pathlib.Path]:
     gate_dir = root / ".opencode" / "steed-gate"
+    installed_scripts_dir = pathlib.Path(__file__).resolve().parent
+    project_permit_script = root / "scripts" / "create-steed-permit.py"
     return {
         "root": root,
         "marker": root / ".steed-gate-scope",
@@ -91,7 +93,7 @@ def resolve_paths(root: pathlib.Path) -> dict[str, pathlib.Path]:
         "gate_config": gate_dir / "config.json",
         "permit": gate_dir / "permit.json",
         "workflow_dir": root / "infra_scripts" / "workflow",
-        "permit_script": root / "scripts" / "create-steed-permit.py",
+        "permit_script": project_permit_script if project_permit_script.exists() else installed_scripts_dir / "create-steed-permit.py",
     }
 
 
@@ -986,9 +988,13 @@ def resolve_runtime_steed(paths: dict[str, pathlib.Path]) -> pathlib.Path:
     if project_steed.exists():
         return project_steed
 
-    bundled_steed = pathlib.Path(__file__).resolve().parent.parent / "steed"
-    if bundled_steed.exists():
-        return bundled_steed
+    installed_root = pathlib.Path(__file__).resolve().parent.parent
+    for bundled_steed in [
+        installed_root / "runtime" / "steed",
+        installed_root / "steed",
+    ]:
+        if bundled_steed.exists():
+            return bundled_steed
 
     return project_steed
 
@@ -1036,7 +1042,10 @@ def command_run(args: argparse.Namespace, paths: dict[str, pathlib.Path]) -> int
                 print(f"defaulted LIUM_YES=1 in {cfg_path}")
 
     cmd = [str(steed_path), *argv]
-    completed = subprocess.run(cmd, check=False)
+    env = dict(os.environ)
+    env["WORKFLOW_CONFIG"] = str(workflow_config_path(paths, profile).resolve())
+    env["WF_WRAPPER_ALLOW_OVERRIDE"] = "1"
+    completed = subprocess.run(cmd, check=False, env=env)
 
     if completed.returncode == 0 and argv and argv[0] == "pod-up":
         cfg_path = workflow_config_path(paths, profile)

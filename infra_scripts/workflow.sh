@@ -1166,8 +1166,8 @@ load_config() {
   source "$CONFIG_PATH"
 
   if [[ "${WF_ACTIVE_COMMAND:-}" != _* && "$WF_ACTIVE_CONFIG_REALPATH" != "$CANONICAL_CONFIG_PATH" ]]; then
-    if ! is_truthy "${WF_ALLOW_OVERRIDE:-0}"; then
-      die "WORKFLOW_CONFIG override blocked by constitution; use ${CANONICAL_CONFIG_PATH} or set WF_ALLOW_OVERRIDE=1 in ${CONFIG_PATH}"
+    if ! is_truthy "${WF_ALLOW_OVERRIDE:-0}" && ! is_truthy "${WF_WRAPPER_ALLOW_OVERRIDE:-0}"; then
+      die "WORKFLOW_CONFIG override blocked by constitution; use ${CANONICAL_CONFIG_PATH}, set WF_ALLOW_OVERRIDE=1 in ${CONFIG_PATH}, or use the Steed wrapper"
     fi
   fi
 }

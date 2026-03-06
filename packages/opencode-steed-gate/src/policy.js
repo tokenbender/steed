@@ -227,6 +227,22 @@ function parseSteedSubcommand(command) {
   return ""
 }
 
+export function isSteedProjectWrapperCommand(command) {
+  return !!parseSteedProjectCommand(command)
+}
+
+export function isDirectSteedRuntimeCommand(command) {
+  if (parseSteedProjectCommand(command)) {
+    return false
+  }
+  return !!parseSteedSubcommand(command)
+}
+
+export function resolveActionWorktree(action, config) {
+  const raw = action?.args?.workdir || config?.worktree || action?.worktree || process.cwd()
+  return path.resolve(String(raw || process.cwd()))
+}
+
 function sanitizeArgsForPermit(tool, args) {
   const safe = args || {}
 
@@ -514,6 +530,18 @@ export function buildDenyPayload({ code, message, action, config, permitRequired
         "fetch-all",
         "fetch-run",
       ],
+    }
+  } else if (code === "DENY_DIRECT_RUNTIME_BYPASS") {
+    desiredAction = {
+      type: "USE_STEED_WRAPPER",
+      description: "Run Steed through the /steed wrapper only; direct runtime bash is blocked.",
+      example: "/steed pod-up",
+    }
+  } else if (code === "DENY_WORKTREE_DRIFT") {
+    desiredAction = {
+      type: "RETURN_TO_SESSION_WORKTREE",
+      description: "Run the Steed wrapper from the original project worktree only.",
+      example: "/steed status",
     }
   } else if (code === "DENY_AUTO_WINDOW_EXPIRED") {
     desiredAction = {

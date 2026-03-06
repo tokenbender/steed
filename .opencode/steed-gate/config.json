@@ -1,0 +1,9 @@
+{
+  "allow_flow_autorun": false,
+  "auto_max_mutations": 8,
+  "auto_ttl_secs": 900,
+  "mode": "manual",
+  "profile": "default",
+  "require_permit": false,
+  "scope_mode": "auto"
+}
